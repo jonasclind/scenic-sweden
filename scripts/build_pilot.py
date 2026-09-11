@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
+from scenic import safe
 from scenic import score as sc
 from scenic.grid import build_local_grid
 from scenic.render import compose, downsample
@@ -36,7 +37,9 @@ def main():
     eye = sc.MODES[args.mode]["eye_height"]
     half_km = args.core_km / 2 + args.max_dist / 1000.0   # core + view buffer
 
-    DATA_OUT.mkdir(parents=True, exist_ok=True)
+    free = safe.check_free_space(need_gb=2.0)
+    print(f"T7 free: {free:.0f} GB (reserve {safe.RESERVE_GB:.0f} GB)")
+    safe.ensure_dir(DATA_OUT)
     IMG_OUT.mkdir(parents=True, exist_ok=True)
 
     t = time.time()
@@ -80,7 +83,7 @@ def main():
                   water_mask=water, max_dist=args.max_dist, progress=prog)
     print(f"  signatures ({time.time()-t:.1f}s)")
 
-    npz = DATA_OUT / f"alingsas_{args.mode}_{int(args.obs_step)}m.npz"
+    npz = safe.guard(DATA_OUT / f"alingsas_{args.mode}_{int(args.obs_step)}m.npz")
     np.savez_compressed(
         npz, x=sig.x, y=sig.y, ground=sig.ground, horizon=sig.horizon,
         max_dist=sig.max_dist, water_near=sig.water_near, water_far=sig.water_far,
