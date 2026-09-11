@@ -16,12 +16,15 @@ ROOT = Path("/Volumes/T7/scenic/dem/tessadem/raw")
 
 # name, lat, lon, expected metres, tolerance
 LANDMARKS = [
-    ("Kattegat, open sea",   57.600, 11.500,   0.0, 12.0),
-    ("Goteborg centre",      57.707, 11.967,  15.0, 30.0),
-    ("Lake Mjorn surface",   57.960, 12.450,  60.5, 18.0),
-    ("Alingsas centre",      57.930, 12.533,  70.0, 35.0),
-    ("Boras centre",         57.721, 12.940, 140.0, 40.0),
-    ("Hunneberg plateau",    58.345, 12.420, 150.0, 45.0),
+    # Coordinates located from the data, elevations from independent knowledge:
+    # a landmark only tests anything if its height is not taken from the DEM.
+    ("Kattegat, open sea",   57.600, 11.500,   0.0, 10.0),
+    ("Goteborg centre",      57.707, 11.967,   5.0, 15.0),
+    ("Lake Mjorn surface",   57.907, 12.425,  59.0, 10.0),
+    ("Alingsas centre",      57.930, 12.533,  65.0, 20.0),
+    ("Boras centre",         57.721, 12.940, 140.0, 25.0),
+    ("Hunneberg summit",     58.296, 12.429, 157.0, 20.0),
+    ("Halleberg summit",     58.387, 12.478, 150.0, 20.0),
 ]
 
 

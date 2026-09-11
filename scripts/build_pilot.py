@@ -10,7 +10,7 @@ import numpy as np
 
 from scenic import safe
 from scenic import score as sc
-from scenic.grid import build_local_grid
+from scenic.grid import build_local_grid, metres_per_degree
 from scenic.render import compose, downsample
 from scenic.tessadem import Mosaic
 from scenic.viewshed import compute
@@ -111,12 +111,29 @@ def main():
     }
     for name, f in views.items():
         r = sc.apply(sig, f)
-        v = np.where(r["keep"], r["openness"], 0.0).reshape(n, n)
-        img = compose(v, terrain, args.obs_step, water=wat)
+        v = np.where(r["keep"], r["openness"], 0.0)
+        img = compose(v.reshape(n, n), terrain, args.obs_step, water=wat)
         p = IMG_OUT / f"{args.name}_{args.mode}_{name}.png"
         img.save(p)
         print(f"  {p.name}: {int(r['keep'].sum()):,} cells pass, "
               f"best reach {r['best_dist'].max()/1000:.1f} km")
+
+        if name == "openness":
+            rb = sc.robust(v, (n, n), radius_cells=1)
+            img = compose(rb.reshape(n, n), terrain, args.obs_step, water=wat)
+            img.save(IMG_OUT / f"{args.name}_{args.mode}_openness_robust.png")
+            spots = sc.top_spots(rb, (n, n), sig, n=10)
+            m_lat, m_lon = metres_per_degree(lat0)
+            print(f"\n  top 10 spots (worst view within 100 m, {args.mode} mode)")
+            print(f"  {'#':>2} {'lat':>8} {'lon':>8} {'alt':>5} {'mean':>6} "
+                  f"{'best':>6} {'dir':>5} {'water':>6}")
+            for k, sp in enumerate(spots, 1):
+                la = lat0 + sp["y"] / m_lat
+                lo = lon0 + sp["x"] / m_lon
+                print(f"  {k:2d} {la:8.4f} {lo:8.4f} {sp['ground']:5.0f} "
+                      f"{sp['score']/1000:5.1f}k {sp['best_km']:5.1f}k "
+                      f"{sp['best_dir']:5.0f} {sp['water_km']:5.1f}k")
+            print()
 
 
 if __name__ == "__main__":

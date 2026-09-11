@@ -72,3 +72,45 @@ def sunset_azimuth(lat_deg: float, day_of_year: int) -> float:
     cos_az = np.sin(decl) / np.cos(lat)          # at h = 0
     sunrise = np.degrees(np.arccos(np.clip(cos_az, -1.0, 1.0)))
     return float(360.0 - sunrise)                # sunset mirrors sunrise about north
+
+
+def robust(values: np.ndarray, shape: tuple, radius_cells: int = 1) -> np.ndarray:
+    """Worst score within a neighbourhood.
+
+    Around Alingsas the raw per-cell score is genuinely speckled: step 100 m and
+    a small rise can cost you 15 km of view. A spot you must stand on exactly is
+    not a plot and not a picnic site, so we rank on the worst view within a short
+    walk rather than the best view at a point.
+    """
+    from scipy import ndimage
+    return ndimage.minimum_filter(values.reshape(shape),
+                                  size=2 * radius_cells + 1).ravel()
+
+
+def top_spots(values: np.ndarray, shape: tuple, sig: Signatures, n: int = 10,
+              separation_cells: int = 15) -> list:
+    """Rank distinct viewpoints, greedily suppressing neighbours of each winner.
+
+    A local-maximum test is not enough on its own: a flat hilltop has many cells
+    tying for the maximum, so they all survive and the list fills with duplicates
+    of one place. Taking winners in order and blanking a radius around each is
+    what actually enforces separation.
+    """
+    ny, nx = shape
+    a = values.reshape(shape).astype(np.float64).copy()
+    a[~np.isfinite(a)] = -np.inf
+    out = []
+    for _ in range(n):
+        i = int(np.argmax(a))
+        if not np.isfinite(a.flat[i]) or a.flat[i] <= 0:
+            break
+        r, c = divmod(i, nx)
+        out.append(dict(
+            i=i, x=float(sig.x[i]), y=float(sig.y[i]),
+            ground=float(sig.ground[i]), score=float(values[i]),
+            best_dir=float(np.argmax(sig.max_dist[i]) * 360.0 / sig.n_azimuth),
+            best_km=float(sig.max_dist[i].max() / 1000.0),
+            water_km=float(sig.water_far[i].max() / 1000.0)))
+        a[max(0, r - separation_cells):r + separation_cells + 1,
+          max(0, c - separation_cells):c + separation_cells + 1] = -np.inf
+    return out
