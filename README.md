@@ -31,9 +31,21 @@ Outputs: signatures to `/Volumes/T7/scenic/pilot/*.npz`, heatmaps to `out/*.png`
     ./.venv/bin/python scripts/export_web.py      # recompute the four layers
     ./.venv/bin/python -m http.server 8731 --directory web
 
-Then open http://localhost:8731. Satellite or OSM basemap, two views (how far you
-see / sees water), a checkbox that strips the forest, opacity, and the ten best
-spots as clickable markers with Google Maps links.
+Then open http://localhost:8731.
+
+- **Direction wheel** - drag either handle to set the arc of bearings that count,
+  or drag the arc to swing it round. Presets for N/E/S/W and for today's sunset
+  bearing, which at 58N swings from about 221 degrees at midwinter to 318 at
+  midsummer.
+- **How far you can see** - a two-handle band that both filters and sets the
+  colour scale. The top handle at its maximum means "and above". Square-root
+  spaced, because the distribution is long-tailed: median 1.9 km, best 12.3.
+- Satellite or OSM basemap, how-far-you-see vs sees-water, a checkbox that
+  strips the forest, opacity, and the ten best spots as markers.
+
+Filtering happens in the browser over the shipped per-azimuth signature, not
+against pre-rendered layers - about 40 ms for a full recompute of 251,001 cells,
+so the wheel is live rather than a set of baked presets.
 
 It has to run locally rather than as a published artifact, because artifact pages
 cannot load map tiles from external hosts.

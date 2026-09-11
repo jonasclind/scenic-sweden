@@ -1,4 +1,10 @@
-"""Compute the Alingsas layers and export them for the web map."""
+"""Compute the Alingsas layers and export them for the web map.
+
+Ships the per-azimuth signature itself rather than pre-rendered pictures. That
+is the point of the signature format: every filter the UI offers - direction
+wedge, minimum distance, water - is then arithmetic over 32 numbers per cell,
+done live in the browser, instead of a layer we had to bake in advance.
+"""
 import json
 import sys
 import time
@@ -8,18 +14,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from scenic import score as sc
 from scenic.grid import build_local_grid, metres_per_degree
 from scenic.tessadem import Mosaic
-from scenic.vegetation import obstruction_height, surface
+from scenic.vegetation import CANOPY_M, obstruction_height, surface
 from scenic.viewshed import compute
 from scenic.water import detect_water
-from scenic.webmap import RAMP_HEX, to_mercator_png
+from scenic.webmap import RAMP_HEX
 
 ALINGSAS = (57.930, 12.533)
 CORE_KM = 50.0
 MAX_DIST = 20000.0
 OBS_STEP = 100.0
+N_AZ = 32
 DEM = Path("/Volumes/T7/scenic/dem/tessadem/raw")
 WEB = Path(__file__).resolve().parents[1] / "web"
 
@@ -28,6 +34,7 @@ def main():
     lat0, lon0 = ALINGSAS
     half_km = CORE_KM / 2 + MAX_DIST / 1000
     m_lat, m_lon = metres_per_degree(lat0)
+    (WEB / "layers").mkdir(parents=True, exist_ok=True)
 
     mos = Mosaic.build(DEM, int(np.floor(lat0 - half_km/111)), int(np.floor(lat0 + half_km/111)),
                        int(np.floor(lon0 - half_km/60)), int(np.floor(lon0 + half_km/60)))
@@ -35,7 +42,7 @@ def main():
     water = detect_water(grid.z, 25.0)
     veg = obstruction_height(grid)
     surf = surface(grid, veg)
-    print(f"grid {grid.z.shape}   tree cover {(veg>10).mean()*100:.0f}%   "
+    print(f"grid {grid.z.shape}  tree cover {(veg >= CANOPY_M).mean()*100:.0f}%  "
           f"water {water.mean()*100:.1f}%")
 
     half_core = CORE_KM * 1000 / 2
@@ -43,49 +50,37 @@ def main():
     ax = (np.arange(n) - (n - 1) / 2) * OBS_STEP
     OX, OY = np.meshgrid(ax, ax)
 
-    layers, manifest = {}, []
-    for veg_on, tag in ((False, "bare"), (True, "trees")):
+    states = []
+    for veg_on, tag in ((True, "trees"), (False, "bare")):
         t = time.time()
-        sig = compute(grid, OX.ravel(), OY.ravel(), eye_height=1.7, n_azimuth=32,
+        sig = compute(grid, OX.ravel(), OY.ravel(), eye_height=1.7, n_azimuth=N_AZ,
                       water_mask=water, max_dist=MAX_DIST,
                       surface=surf if veg_on else None)
         print(f"  {tag}: {time.time()-t:.0f}s")
-        layers[tag] = sig
 
-    # A shared scale across both vegetation states: the checkbox must show the
-    # view being taken away, not silently renormalise the colours. Fixed round
-    # numbers rather than percentiles - the distribution is heavily skewed
-    # (median 1.9 km, max 12.3), so a p97 cap threw away the entire top end,
-    # which is the only part worth looking at.
-    lo_hi = (0.0, 8000.0)
+        # distance per azimuth, quantised to 8 bits (78 m per step at 20 km)
+        dist = np.clip(sig.max_dist / MAX_DIST * 255.0, 0, 255).astype(np.uint8)
+        # one bit per azimuth: is water visible that way
+        bits = (sig.water_far > 0).astype(np.uint32)
+        wmask = (bits << np.arange(N_AZ, dtype=np.uint32)).sum(axis=1).astype(np.uint32)
+        valid = (~sig.on_water & np.isfinite(sig.ground)).astype(np.uint8)
 
-    for tag, sig in layers.items():
-        for view, filt in (("openness", sc.Filters()),
-                           ("water", sc.Filters(require_water=True, min_water_distance=300))):
-            r = sc.apply(sig, filt)
-            v = sc.robust(np.where(r["keep"], r["openness"], 0.0), (n, n), OBS_STEP)
-            valid = r["keep"].reshape(n, n) & (v.reshape(n, n) > 0)
-            img, bounds, used = to_mercator_png(
-                v.reshape(n, n), valid, lat0, lon0, half_core, m_lat, m_lon, lo_hi=lo_hi)
-            name = f"{view}_{tag}.png"
-            img.save(WEB / "layers" / name)
-            spots = sc.top_spots(np.where(valid.ravel(), v, 0.0), (n, n), sig,
-                                 n=10, separation_cells=int(2000 / OBS_STEP))
-            for sp in spots:
-                sp["lat"] = lat0 + sp["y"] / m_lat
-                sp["lon"] = lon0 + sp["x"] / m_lon
-            manifest.append(dict(view=view, vegetation=tag, file=f"layers/{name}",
-                                 bounds=bounds, cells=int(valid.sum()),
-                                 median_km=float(np.median(v[valid.ravel()]) / 1000),
-                                 spots=spots))
-            print(f"  wrote {name}  {int(valid.sum()):,} cells  "
-                  f"median {np.median(v[valid.ravel()])/1000:.1f} km")
+        (WEB / "layers" / f"dist_{tag}.bin").write_bytes(dist.tobytes())
+        (WEB / "layers" / f"water_{tag}.bin").write_bytes(wmask.tobytes())
+        (WEB / "layers" / f"valid_{tag}.bin").write_bytes(valid.tobytes())
+        states.append(tag)
+        print(f"    dist {dist.nbytes/1e6:.1f} MB   "
+              f"{int(valid.sum()):,} land cells   "
+              f"{int((wmask > 0).sum()):,} see water somewhere")
 
+    lat_s, lat_n = lat0 - half_core / m_lat, lat0 + half_core / m_lat
+    lon_w, lon_e = lon0 - half_core / m_lon, lon0 + half_core / m_lon
     (WEB / "data.json").write_text(json.dumps(dict(
-        centre=[lat0, lon0], layers=manifest, ramp=RAMP_HEX,
-        scale_km=[lo_hi[0] / 1000, lo_hi[1] / 1000],
-        max_dist_km=MAX_DIST / 1000, obs_step_m=OBS_STEP), indent=2))
-    print(f"\nwrote web/data.json  scale {lo_hi[0]/1000:.1f}-{lo_hi[1]/1000:.1f} km")
+        centre=[lat0, lon0], bounds=[lon_w, lat_s, lon_e, lat_n],
+        n=n, azimuths=N_AZ, states=states, ramp=RAMP_HEX,
+        max_dist_km=MAX_DIST / 1000, obs_step_m=OBS_STEP,
+        scale_km=[0.0, 8.0], canopy_m=CANOPY_M), indent=2))
+    print(f"\nwrote web/data.json  ({n}x{n} cells, {N_AZ} azimuths)")
 
 
 if __name__ == "__main__":
