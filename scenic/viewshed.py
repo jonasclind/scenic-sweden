@@ -44,6 +44,7 @@ class Signatures:
     max_dist: np.ndarray       # (n, a) farthest visible distance, metres
     water_near: np.ndarray     # (n, a) nearest visible water, inf if none
     water_far: np.ndarray      # (n, a) farthest visible water, 0 if none
+    on_water: np.ndarray       # (n,) observer is itself standing in water
     n_azimuth: int
 
     def azimuth_deg(self) -> np.ndarray:
@@ -63,6 +64,7 @@ def compute(grid: LocalGrid, ox: np.ndarray, oy: np.ndarray,
     drops = (ds ** 2) / (2 * R_EFF)          # curvature + refraction
 
     ground = np.empty(n, np.float32)
+    on_water = np.zeros(n, bool)
     horizon = np.empty((n, n_azimuth), np.float32)
     max_d = np.empty((n, n_azimuth), np.float32)
     w_near = np.empty((n, n_azimuth), np.float32)
@@ -77,6 +79,8 @@ def compute(grid: LocalGrid, ox: np.ndarray, oy: np.ndarray,
         cx, cy = ox[s:e], oy[s:e]
         g = grid.sample(cx, cy)
         ground[s:e] = g
+        if water_mask is not None:
+            on_water[s:e] = grid.sample_nearest_bool(water_mask, cx, cy)
         z0 = g.astype(np.float64) + eye_height
 
         for a, th in enumerate(thetas):
@@ -110,4 +114,4 @@ def compute(grid: LocalGrid, ox: np.ndarray, oy: np.ndarray,
 
     return Signatures(x=ox, y=oy, ground=ground, horizon=horizon,
                       max_dist=max_d, water_near=w_near, water_far=w_far,
-                      n_azimuth=n_azimuth)
+                      on_water=on_water, n_azimuth=n_azimuth)

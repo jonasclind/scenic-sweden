@@ -25,6 +25,9 @@ IMG_OUT = Path(__file__).resolve().parents[1] / "out"
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--core-km", type=float, default=50.0, help="analysed box side")
+    ap.add_argument("--lat", type=float, default=ALINGSAS[0])
+    ap.add_argument("--lon", type=float, default=ALINGSAS[1])
+    ap.add_argument("--name", default="alingsas")
     ap.add_argument("--max-dist", type=float, default=20000.0)
     ap.add_argument("--dem-step", type=float, default=25.0, help="terrain grid spacing")
     ap.add_argument("--obs-step", type=float, default=100.0, help="observer spacing")
@@ -33,7 +36,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="debug: cap observer count")
     args = ap.parse_args()
 
-    lat0, lon0 = ALINGSAS
+    lat0, lon0 = args.lat, args.lon
     eye = sc.MODES[args.mode]["eye_height"]
     half_km = args.core_km / 2 + args.max_dist / 1000.0   # core + view buffer
 
@@ -83,10 +86,10 @@ def main():
                   water_mask=water, max_dist=args.max_dist, progress=prog)
     print(f"  signatures ({time.time()-t:.1f}s)")
 
-    npz = safe.guard(DATA_OUT / f"alingsas_{args.mode}_{int(args.obs_step)}m.npz")
+    npz = safe.guard(DATA_OUT / f"{args.name}_{args.mode}_{int(args.obs_step)}m.npz")
     np.savez_compressed(
         npz, x=sig.x, y=sig.y, ground=sig.ground, horizon=sig.horizon,
-        max_dist=sig.max_dist, water_near=sig.water_near, water_far=sig.water_far,
+        max_dist=sig.max_dist, water_near=sig.water_near, water_far=sig.water_far, on_water=sig.on_water,
         n_azimuth=sig.n_azimuth, lat0=lat0, lon0=lon0, obs_step=args.obs_step,
         eye_height=eye, mode=args.mode)
     print(f"  saved {npz} ({npz.stat().st_size/1e6:.1f} MB)")
@@ -110,7 +113,7 @@ def main():
         r = sc.apply(sig, f)
         v = np.where(r["keep"], r["openness"], 0.0).reshape(n, n)
         img = compose(v, terrain, args.obs_step, water=wat)
-        p = IMG_OUT / f"alingsas_{args.mode}_{name}.png"
+        p = IMG_OUT / f"{args.name}_{args.mode}_{name}.png"
         img.save(p)
         print(f"  {p.name}: {int(r['keep'].sum()):,} cells pass, "
               f"best reach {r['best_dist'].max()/1000:.1f} km")

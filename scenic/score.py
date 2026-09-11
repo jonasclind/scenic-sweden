@@ -51,7 +51,9 @@ def apply(sig: Signatures, f: Filters) -> dict:
     water_ok = (wfar >= max(f.min_water_distance, 1.0)).any(axis=1)
     water_best = wfar.max(axis=1)
 
-    keep = best_dist >= f.min_distance
+    # You cannot stand in a lake. Observers on water see everything in every
+    # direction, so without this they dominate every ranking.
+    keep = (best_dist >= f.min_distance) & ~sig.on_water & np.isfinite(sig.ground)
     if f.require_water:
         keep &= water_ok
 
