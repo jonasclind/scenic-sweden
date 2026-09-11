@@ -36,7 +36,7 @@ def ranked(sig: Signatures, count: int, sep_m: float):
     step = (sig.x.max() - sig.x.min()) / (n - 1)
     r = sc.apply(sig, sc.Filters())
     v = np.where(r["keep"], r["openness"], 0.0)
-    rb = sc.robust(v, (n, n))
+    rb = sc.robust(v, (n, n), step)
     return n, step, rb, sc.top_spots(rb, (n, n), sig, n=count,
                                      separation_cells=max(3, int(sep_m / step)))
 

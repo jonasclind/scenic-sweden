@@ -74,20 +74,25 @@ def sunset_azimuth(lat_deg: float, day_of_year: int) -> float:
     return float(360.0 - sunrise)                # sunset mirrors sunrise about north
 
 
-def robust(values: np.ndarray, shape: tuple, radius_cells: int = 1,
-           percentile: float = 25.0) -> np.ndarray:
-    """Score a location by how it holds up across its neighbourhood.
+def robust(values: np.ndarray, shape: tuple, step_m: float,
+           radius_m: float = 50.0, percentile: float = 25.0) -> np.ndarray:
+    """Score a location by how it holds up over a plot-sized patch of ground.
 
-    Around Alingsas the raw per-cell score is genuinely speckled: step 100 m
-    over a small rise and you can lose 15 km of view, and the worst cells really
-    do see only ~140 m. A spot you must stand on exactly is not a plot, so we
-    rank on a low percentile of the neighbourhood rather than the value at a
-    point. Not the minimum: that is an extreme statistic, and a single blind cell
-    would blank everything around it.
+    The radius is in METRES, not cells: expressed in cells this silently
+    averaged over 300 m at 100 m observer spacing and 75 m at 25 m spacing, so
+    the same terrain scored differently at different resolutions. At 300 m it
+    also penalised precisely what makes a viewpoint - a small sharp crest. One
+    ranked spot sat 100 m short of its summit, trading 3.2 m of height for the
+    whole southern half of its view.
+
+    A building plot is roughly 50 m across and a picnic spot rather less, so
+    that is the scale we ask about. Still a percentile rather than a minimum:
+    one blind cell should not condemn its neighbourhood.
     """
     from scipy import ndimage
+    r = max(1, int(round(radius_m / step_m)))
     return ndimage.percentile_filter(values.reshape(shape), percentile=percentile,
-                                     size=2 * radius_cells + 1).ravel()
+                                     size=2 * r + 1).ravel()
 
 
 def top_spots(values: np.ndarray, shape: tuple, sig: Signatures, n: int = 10,

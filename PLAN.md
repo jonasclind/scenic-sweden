@@ -105,7 +105,28 @@ scores the view in that specific direction. At 58 °N the sunset azimuth swings 
 southwest in midwinter to far northwest at midsummer, so "good sunset spot" is genuinely
 date-dependent — this is where the tool beats eyeballing a contour map.
 
+## Observer spacing drives correctness, not just detail
+
+A ranked spot near Alingsas turned out to sit 100 m short of its summit, trading
+3.2 m of height for the entire southern half of its view: a 203.6 m crest 100 m
+south blocks a standing eye at 200.4 m but not a 5 m one. At 100 m observer
+spacing the ranker cannot see the difference, because the robustness window can
+never be finer than the spacing. At 25 m it picks the crest and the score rises
+from 10.5 to 13.3 km.
+
+So **final rankings need 25 m observer spacing**. That is 160M observers over the
+full region, ~24 h in numpy, which is where a Rust port would finally earn its
+keep. The cheaper answer is **two-stage**: scan at 100 m to find promising areas,
+then re-rank only those at 25 m. Roughly 95% less compute for the same answer.
+
 ## Two things that will bite us
+
+0. **Vegetation is not modelled at all.** Confirmed against the pilot: TessaDEM
+   is bare earth (only 0.26% of raw cells step >8 m to a neighbour), so every
+   score is a view as if the county were clear-felled, and Jonas's verdict on the
+   first ranked list was that most spots sit in forest. This is a prerequisite,
+   not a refinement. Free options without an account: ESA WorldCover 10 m for a
+   tree mask, or the ETH 10 m global canopy height model for real heights.
 
 1. **Heatmaps smear along ridgelines.** Every cell on a 3 km ridge scores alike, so "best
    spots" becomes a stripe. Needs non-max suppression / clustering to produce a ranked list of

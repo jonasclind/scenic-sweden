@@ -123,7 +123,7 @@ def main():
               f"best reach {r['best_dist'].max()/1000:.1f} km")
 
         if name == "openness":
-            rb = sc.robust(v, (n, n), radius_cells=1)
+            rb = sc.robust(v, (n, n), args.obs_step)
             img = compose(rb.reshape(n, n), terrain, args.obs_step, water=wat, upscale=up)
             sep = max(3, int(round(args.core_km * 1000 / 10 / args.obs_step)))
             spots = sc.top_spots(rb, (n, n), sig, n=args.spots, separation_cells=sep)
