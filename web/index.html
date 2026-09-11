@@ -112,9 +112,16 @@
       <button data-v="sat" aria-pressed="true">Satellite</button>
       <button data-v="osm" aria-pressed="false">Map</button>
     </div>
-    <div class="lbl" style="margin-top:11px">Overlay opacity</div>
-    <input type="range" id="op" min="0" max="100" value="85">
+    <div class="rowlbl" style="margin-top:11px">
+      <span class="lbl" style="margin:0">Clarity</span>
+      <span id="clarityv"></span>
+    </div>
+    <input type="range" id="clarity" min="0" max="100" step="1" value="50">
+    <div class="ticks" style="height:12px">
+      <span style="left:0;transform:none">map</span>
+      <span style="left:50%">both</span>
+      <span style="left:100%;transform:translateX(-100%)">heatmap</span>
+    </div>
   </div>
-</div>
 
 <script type="module" src="app.js"></script>

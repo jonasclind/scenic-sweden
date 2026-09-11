@@ -40,8 +40,14 @@ Then open http://localhost:8731.
 - **How far you can see** - a two-handle band that both filters and sets the
   colour scale. The top handle at its maximum means "and above". Square-root
   spaced, because the distribution is long-tailed: median 1.9 km, best 12.3.
+- **Clarity** - one slider covering the whole range from bare basemap to bare
+  heatmap. Below the midpoint it fades the overlay in over untouched ground;
+  above it the overlay is already solid, so further travel whitens the basemap
+  behind it instead. The colours never weaken, which is the point: fading the
+  heatmap to make it legible defeats the purpose.
 - Satellite or OSM basemap, how-far-you-see vs sees-water, a checkbox that
-  strips the forest, opacity, and the ten best spots as markers.
+  strips the forest, and the ten best spots as markers, each linking out to
+  Google Maps in its own window.
 
 Filtering happens in the browser over the shipped per-azimuth signature, not
 against pre-rendered layers - about 40 ms for a full recompute of 251,001 cells,

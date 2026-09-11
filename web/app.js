@@ -148,7 +148,34 @@ function topSpots(score, count = 10, sep = 20) {
   return out;
 }
 
-let pending = false;
+let pending = false, pushing = false, queued = false;
+
+/* Hand the new overlay to the map, one at a time.
+ *
+ * Dragging a control can produce a new image every frame, and each call to
+ * updateImage cancels the previous fetch - which surfaced as a stream of
+ * unhandled AbortErrors. Only one push is ever in flight, and the image is
+ * decoded before the map is asked for it, so the map's own fetch comes
+ * straight from cache and there is nothing left to cancel. */
+function pushOverlay() {
+  const src = map && map.getSource('ov');
+  if (!src) return;
+  if (pushing) { queued = true; return; }
+  pushing = true;
+  document.getElementById('ovcanvas').toBlob(b => {
+    const url = URL.createObjectURL(b);
+    const im = new Image();
+    im.onload = im.onerror = () => {
+      src.updateImage({ url });
+      const stale = objUrl;
+      objUrl = url;
+      if (stale) setTimeout(() => URL.revokeObjectURL(stale), 4000);
+      pushing = false;
+      if (queued) { queued = false; pushOverlay(); }
+    };
+    im.src = url;
+  }, 'image/png');
+}
 function refresh() {
   if (pending) return;
   pending = true;
@@ -161,16 +188,7 @@ function refresh() {
     draw(score, top);
     const spots = topSpots(score);
 
-    const src = map && map.getSource('ov');
-    if (src) {
-      document.getElementById('ovcanvas').toBlob(b => {
-        const url = URL.createObjectURL(b);
-        src.updateImage({ url });
-        const stale = objUrl;                    // let the in-flight load finish
-        if (stale) setTimeout(() => URL.revokeObjectURL(stale), 4000);
-        objUrl = url;
-      }, 'image/png');
-    }
+    pushOverlay();
     if (map) placeMarkers(spots);
 
     const sp = wheel.span();
@@ -191,7 +209,7 @@ function placeMarkers(spots) {
     const pop = new maplibregl.Popup({ offset: 14 }).setHTML(
       `<b>#${i + 1} &mdash; ${sp.km.toFixed(1)} km</b><br>` +
       `${sp.lat.toFixed(5)}, ${sp.lon.toFixed(5)}<br>` +
-      `<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${sp.lat.toFixed(5)},${sp.lon.toFixed(5)}">open in Google Maps</a>`);
+      `<a target="_blank" rel="noopener noreferrer" href="https://www.google.com/maps/search/?api=1&query=${sp.lat.toFixed(5)},${sp.lon.toFixed(5)}">open in Google Maps</a>`);
     return new maplibregl.Marker({ element: el }).setLngLat([sp.lon, sp.lat])
       .setPopup(pop).addTo(map);
   });
@@ -236,9 +254,8 @@ function buildUI() {
   document.getElementById('bare').addEventListener('change', e => {
     state.veg = e.target.checked ? 'bare' : 'trees'; refresh();
   });
-  document.getElementById('op').addEventListener('input', e => {
-    map.setPaintProperty('ov', 'raster-opacity', e.target.value / 100);
-  });
+  const clarity = document.getElementById('clarity');
+  clarity.addEventListener('input', () => setClarity(+clarity.value));
 }
 
 /* Ticks sit at their square-root positions so they line up with the slider. */
@@ -251,6 +268,20 @@ function renderTicks() {
     s.style.left = (range.pos(v) * 100) + '%';
     el.appendChild(s);
   }
+}
+
+/* One control, two halves. Below the midpoint the overlay fades in over an
+ * untouched basemap; above it the overlay is already solid, so further travel
+ * whitens the basemap instead. The midpoint is both at full strength. */
+function setClarity(v) {
+  const overlay = v <= 50 ? v / 50 : 1;
+  const veil = v <= 50 ? 0 : (v - 50) / 50;
+  if (map) {
+    map.setPaintProperty('ov', 'raster-opacity', overlay);
+    map.setPaintProperty('veil', 'background-opacity', veil);
+  }
+  document.getElementById('clarityv').textContent =
+    veil > 0 ? `map faded ${Math.round(veil * 100)}%` : `overlay ${Math.round(overlay * 100)}%`;
 }
 
 function buildMap() {
@@ -275,6 +306,11 @@ function buildMap() {
       layers: [
         { id: 'base-sat', type: 'raster', source: 'sat' },
         { id: 'base-osm', type: 'raster', source: 'osm', layout: { visibility: 'none' } },
+        // Sits between basemap and overlay: the upper half of the clarity
+        // slider fades the ground away behind the heatmap rather than fading
+        // the heatmap itself, so the colours stay at full strength throughout.
+        { id: 'veil', type: 'background',
+          paint: { 'background-color': '#ffffff', 'background-opacity': 0 } },
         { id: 'ov', type: 'raster', source: 'ov',
           paint: { 'raster-opacity': 0.85, 'raster-fade-duration': 0 } },
       ],
@@ -283,15 +319,23 @@ function buildMap() {
     attributionControl: { compact: false },
   });
   window.map = map;
+  // Replacing the overlay image cancels any still-loading predecessor. That is
+  // the intended behaviour while dragging a control, so acknowledge it rather
+  // than letting it surface as an unhandled error.
+  map.on('error', e => {
+    const err = e && e.error;
+    if (err && (err.name === 'AbortError' || err.code === 20)) return;
+    console.warn('map error', err || e);
+  });
   map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 120 }), 'bottom-left');
-  map.on('load', refresh);
+  map.on('load', () => { setClarity(+document.getElementById('clarity').value); refresh(); });
   map.on('click', e => {
     if (e.originalEvent.target.closest('.spot')) return;
     const { lat, lng } = e.lngLat;
     new maplibregl.Popup().setLngLat(e.lngLat).setHTML(
       `${lat.toFixed(5)}, ${lng.toFixed(5)}<br>` +
-      `<a target="_blank" href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lng.toFixed(5)}">open in Google Maps</a>`
+      `<a target="_blank" rel="noopener noreferrer" href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lng.toFixed(5)}">open in Google Maps</a>`
     ).addTo(map);
   });
 }
