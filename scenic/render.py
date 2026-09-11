@@ -82,3 +82,17 @@ def mark_spots(img: Image.Image, spots, x0: float, y0: float, span: float,
         tx = min(px + r + 2, w - 12); ty = min(max(py - r, 0), img.height - 12)
         d.text((tx, ty), str(k), fill=(255, 255, 255))
     return img
+
+
+def draw_box(img: Image.Image, half_m: float, span: float,
+             label: str | None = None) -> Image.Image:
+    """Outline a centred sub-area, in metres, on a centred map image."""
+    from PIL import ImageDraw
+    d = ImageDraw.Draw(img)
+    w = img.width
+    f = half_m / (span / 2)
+    lo, hi = w * (1 - f) / 2, w * (1 + f) / 2
+    d.rectangle([lo, lo, hi, hi], outline=(255, 255, 255), width=2)
+    if label:
+        d.text((lo + 4, lo + 4), label, fill=(255, 255, 255))
+    return img
