@@ -24,6 +24,11 @@
     color:var(--ink-2);cursor:pointer;border-right:1px solid var(--line)}
   .seg button:last-child{border-right:0}
   .seg button[aria-pressed="true"]{background:var(--accent);color:#fff;font-weight:500}
+  .eyeseg button{padding:5px 2px;line-height:1.25}
+  .eyeseg em{display:block;font-style:normal;font-size:10px;opacity:.65}
+  #busy{position:absolute;top:12px;left:276px;z-index:3;background:var(--surface);
+    border:1px solid var(--line);border-radius:6px;padding:5px 10px;font-size:11px;
+    color:var(--ink-2);box-shadow:0 2px 8px rgba(0,0,0,.12)}
   #wheel{display:block;width:140px;height:140px;margin:2px auto 6px;touch-action:none;user-select:none}
   #presets{display:flex;flex-wrap:wrap;gap:4px}
   #presets button{flex:1 0 28%;padding:4px 2px;font:inherit;font-size:11px;background:#fff;
@@ -57,6 +62,7 @@
 </style>
 
 <div id="map"></div>
+<div id="busy" hidden>loading…</div>
 <canvas id="ovcanvas"></canvas>
 
 <div class="panel">
@@ -82,6 +88,11 @@
       <button data-v="openness" aria-pressed="true">How far you see</button>
       <button data-v="water" aria-pressed="false">Sees water</button>
     </div>
+  </div>
+
+  <div class="grp">
+    <div class="lbl">Eye height</div>
+    <div class="seg eyeseg" id="eye"></div>
   </div>
 
   <div class="grp">

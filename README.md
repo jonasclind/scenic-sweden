@@ -45,6 +45,10 @@ Then open http://localhost:8731.
   above it the overlay is already solid, so further travel whitens the basemap
   behind it instead. The colours never weaken, which is the point: fading the
   heatmap to make it legible defeats the purpose.
+- **Eye height** - ground (0 m), standing (1.7 m) or a second-floor window
+  (5 m). Six signature sets exist (three heights x two vegetation states, ~53 MB
+  in total), so each is fetched the first time it is asked for rather than up
+  front.
 - Satellite or OSM basemap, how-far-you-see vs sees-water, a checkbox that
   strips the forest, and the ten best spots as markers, each linking out to
   Google Maps in its own window.
@@ -60,6 +64,19 @@ Overlays are reprojected to Web Mercator before export. Our grids are linear in
 latitude and a web map is linear in Mercator y; over 50 km at 58N that is ~80 m
 of vertical slip at the centre and more at the edges, which would slide the
 heatmap off the terrain it describes.
+
+## What the eye-height control shows
+
+| median reach | ground | standing | second floor |
+|---|---|---|---|
+| bare earth | 1.53 km | 2.36 km | 3.32 km |
+| with today's canopy | 0.03 km | 0.03 km | 0.03 km |
+
+Under 20 m of spruce it makes no difference whether you are lying on the ground
+or standing at a first-floor window, which is the right answer and a useful
+check on the model. Height only buys a view once you are in the open, and that
+is why per-pixel canopy heights matter more than any other refinement on the
+list.
 
 ## Data
 

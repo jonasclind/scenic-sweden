@@ -23,6 +23,23 @@
     "#CF6B0B",
     "#9C4A07"
   ],
+  "eyes": [
+    {
+      "cm": 0,
+      "m": 0.0,
+      "label": "Ground"
+    },
+    {
+      "cm": 170,
+      "m": 1.7,
+      "label": "Standing"
+    },
+    {
+      "cm": 500,
+      "m": 5.0,
+      "label": "Second floor"
+    }
+  ],
   "max_dist_km": 20.0,
   "obs_step_m": 100.0,
   "scale_km": [

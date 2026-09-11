@@ -1,7 +1,7 @@
 import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js';
 
 const CANVAS = 1024;                       // Mercator-aligned overlay resolution
-const state = { base: 'sat', veg: 'trees', waterOnly: false };
+const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false };
 let D, data, wheel, range, map, markers = [], srcRow, srcCol, ramp;
 
 const BLANK = (() => {                       // a 1x1 transparent seed image
@@ -15,17 +15,39 @@ const invMercY = y => (2 * Math.atan(Math.exp(y)) - Math.PI / 2) * 180 / Math.PI
 
 const bin = (p, T) => fetch(p).then(r => r.arrayBuffer()).then(b => new T(b));
 
+/* Six combinations of vegetation and eye height come to about 56 MB, so a set
+ * is fetched the first time it is asked for and kept thereafter.
+ *
+ * In-flight fetches are tracked separately from finished ones: the set object
+ * only exists once its awaits resolve, so keying off it alone would let two
+ * quick clicks fetch the same 9 MB twice. */
+const inflight = {};
+
+function load(veg, eye) {
+  const key = `${veg}_${eye}`;
+  if (D[key]) return Promise.resolve(D[key]);
+  if (inflight[key]) return inflight[key];
+
+  const busy = document.getElementById('busy');
+  if (busy) busy.hidden = false;
+  inflight[key] = Promise.all([
+    bin(`layers/dist_${key}.bin`, Uint8Array),
+    bin(`layers/water_${key}.bin`, Uint32Array),
+    bin(`layers/valid_${key}.bin`, Uint8Array),
+  ]).then(([dist, water, valid]) => {
+    D[key] = { dist, water, valid };
+    delete inflight[key];
+    if (busy && !Object.keys(inflight).length) busy.hidden = true;
+    return D[key];
+  });
+  return inflight[key];
+}
+
 (async function () {
   data = await fetch('data.json').then(r => r.json());
   ramp = data.ramp.map(h => [1, 3, 5].map(i => parseInt(h.substr(i, 2), 16)));
   D = {};
-  for (const tag of data.states) {
-    D[tag] = {
-      dist: await bin(`layers/dist_${tag}.bin`, Uint8Array),
-      water: await bin(`layers/water_${tag}.bin`, Uint32Array),
-      valid: await bin(`layers/valid_${tag}.bin`, Uint8Array),
-    };
-  }
+  await load(state.veg, state.eye);
   buildLookup();
   buildUI();
   buildMap();
@@ -59,8 +81,9 @@ function selection() {
 
 function computeScore() {
   const n = data.n, A = data.azimuths, cells = n * n;
+  if (!D[`${state.veg}_${state.eye}`]) return new Float32Array(cells);
   const { bins, mask } = selection();
-  const d = D[state.veg], k = data.max_dist_km * 1000 / 255;
+  const d = D[`${state.veg}_${state.eye}`], k = data.max_dist_km * 1000 / 255;
   const raw = new Float32Array(cells);
   const loM = range.lo * 1000;
   const hiM = range.capped() ? Infinity : range.hi * 1000;
@@ -251,8 +274,26 @@ function buildUI() {
       } else { state.waterOnly = b.dataset.v === 'water'; refresh(); }
     });
 
-  document.getElementById('bare').addEventListener('change', e => {
-    state.veg = e.target.checked ? 'bare' : 'trees'; refresh();
+  document.getElementById('bare').addEventListener('change', async e => {
+    state.veg = e.target.checked ? 'bare' : 'trees';
+    await load(state.veg, state.eye);
+    refresh();
+  });
+
+  const eyes = document.getElementById('eye');
+  for (const e of data.eyes) {
+    const b = document.createElement('button');
+    b.dataset.v = e.cm;
+    b.setAttribute('aria-pressed', String(e.cm === state.eye));
+    b.innerHTML = `${e.label}<em>${e.m} m</em>`;
+    eyes.appendChild(b);
+  }
+  eyes.addEventListener('click', async ev => {
+    const b = ev.target.closest('button'); if (!b) return;
+    [...eyes.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
+    state.eye = +b.dataset.v;
+    await load(state.veg, state.eye);
+    refresh();
   });
   const clarity = document.getElementById('clarity');
   clarity.addEventListener('input', () => setClarity(+clarity.value));
