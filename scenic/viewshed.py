@@ -55,7 +55,16 @@ def compute(grid: LocalGrid, ox: np.ndarray, oy: np.ndarray,
             eye_height: float = 1.7, n_azimuth: int = 32,
             water_mask: np.ndarray | None = None,
             max_dist: float = 20000.0, chunk: int = 32768,
+            surface: LocalGrid | None = None,
             progress=None) -> Signatures:
+    """View signatures for every observer.
+
+    `grid` is what observers stand on; `surface` is what blocks them. Pass a
+    surface to model vegetation and buildings: you stand on the ground, under
+    the trees, and it is the canopy that takes your view away. With no surface
+    the two are the same and every result is a clear-felled view.
+    """
+    blocking = surface if surface is not None else grid
     ox = np.asarray(ox, dtype=np.float64).ravel()
     oy = np.asarray(oy, dtype=np.float64).ravel()
     n = ox.size
@@ -93,7 +102,7 @@ def compute(grid: LocalGrid, ox: np.ndarray, oy: np.ndarray,
             for d, drop in zip(ds, drops):
                 sx = cx + dx * d
                 sy = cy + dy * d
-                h = grid.sample(sx, sy)
+                h = blocking.sample(sx, sy)
                 ang = (h - drop - z0) / d
                 vis = ang > run                      # NaN compares False
                 if vis.any():

@@ -26,6 +26,23 @@ misbehave on it.
 
 Outputs: signatures to `/Volumes/T7/scenic/pilot/*.npz`, heatmaps to `out/*.png`.
 
+## The map
+
+    ./.venv/bin/python scripts/export_web.py      # recompute the four layers
+    ./.venv/bin/python -m http.server 8731 --directory web
+
+Then open http://localhost:8731. Satellite or OSM basemap, two views (how far you
+see / sees water), a checkbox that strips the forest, opacity, and the ten best
+spots as clickable markers with Google Maps links.
+
+It has to run locally rather than as a published artifact, because artifact pages
+cannot load map tiles from external hosts.
+
+Overlays are reprojected to Web Mercator before export. Our grids are linear in
+latitude and a web map is linear in Mercator y; over 50 km at 58N that is ~80 m
+of vertical slip at the centre and more at the edges, which would slide the
+heatmap off the terrain it describes.
+
 ## Data
 
 Pilot terrain is TessaDEM v1.2 (~30 m, ODbL), already present on the T7 as a 54 GB global
