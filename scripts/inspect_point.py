@@ -73,8 +73,20 @@ def main():
               f"mean {d.mean()/1000:.1f} km, median {np.median(d)/1000:.1f} km, "
               f"best {d.max()/1000:.1f} km "
               f"{COMPASS[int(round(np.argmax(d)*step/22.5))%16]}, "
-              f"{int((d > 5000).sum())}/{args.azimuths} directions reach 5 km, "
-              f"water in {int((m.water_far[0] > 0).sum())}/{args.azimuths}")
+              f"{int((d > 5000).sum())}/{args.azimuths} directions reach 5 km")
+        # Describe the water rather than counting bins. "water in 1/32" reads as
+        # noise; "a lake 3.7 km NNW, 79 m below you" is the thing you can judge.
+        vis = np.flatnonzero(m.water_far[0] > 0)
+        if len(vis) == 0:
+            print("        no water visible")
+        for a in vis:
+            near, far = m.water_near[0, a] / 1000, m.water_far[0, a] / 1000
+            drop = m.ground[0] - float(grid.sample(
+                np.array([np.sin(np.radians(a * step)) * far * 1000]),
+                np.array([np.cos(np.radians(a * step)) * far * 1000]))[0])
+            span = f"{near:.1f}-{far:.1f}" if far - near > 0.1 else f"{far:.1f}"
+            print(f"        water {span} km to the "
+                  f"{COMPASS[int(round(a*step/22.5))%16]}, {drop:.0f} m below you")
 
 
 if __name__ == "__main__":
