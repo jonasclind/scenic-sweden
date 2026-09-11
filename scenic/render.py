@@ -64,3 +64,21 @@ def compose(score: np.ndarray, terrain: np.ndarray, step: float,
     if upscale > 1:
         img = img.resize((img.width * upscale, img.height * upscale), Image.LANCZOS)
     return img
+
+
+def mark_spots(img: Image.Image, spots, x0: float, y0: float, span: float,
+               upscale: int) -> Image.Image:
+    """Draw numbered markers at ranked spots. Coordinates are metres from the
+    box centre; the image has already been flipped so north is up."""
+    from PIL import ImageDraw
+    d = ImageDraw.Draw(img)
+    w = img.width
+    for k, sp in enumerate(spots, 1):
+        px = (sp["x"] - x0) / span * w
+        py = w - (sp["y"] - y0) / span * w          # flip: north is up
+        r = 7 * upscale / 2
+        d.ellipse([px - r, py - r, px + r, py + r], outline=(255, 255, 255), width=2)
+        d.ellipse([px - 2, py - 2, px + 2, py + 2], fill=(255, 255, 255))
+        tx = min(px + r + 2, w - 12); ty = min(max(py - r, 0), img.height - 12)
+        d.text((tx, ty), str(k), fill=(255, 255, 255))
+    return img

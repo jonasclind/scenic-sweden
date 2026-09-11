@@ -11,7 +11,7 @@ import numpy as np
 from scenic import safe
 from scenic import score as sc
 from scenic.grid import build_local_grid, metres_per_degree
-from scenic.render import compose, downsample
+from scenic.render import compose, downsample, mark_spots
 from scenic.tessadem import Mosaic
 from scenic.viewshed import compute
 from scenic.water import detect_water
@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--dem-step", type=float, default=25.0, help="terrain grid spacing")
     ap.add_argument("--obs-step", type=float, default=100.0, help="observer spacing")
     ap.add_argument("--azimuths", type=int, default=32)
+    ap.add_argument("--spots", type=int, default=10)
     ap.add_argument("--mode", choices=["picnic", "plot"], default="picnic")
     ap.add_argument("--limit", type=int, default=0, help="debug: cap observer count")
     args = ap.parse_args()
@@ -102,7 +103,9 @@ def main():
         return a[np.ix_(ys, xs)]
 
     terrain = downsample(crop_core(grid.z), n, n)
-    wat = downsample(crop_core(water), n, n)
+    # overlay from the signature, not a second downsample of the mask:
+    # two samplings of the same truth disagree at the edges and leave specks
+    wat = sig.on_water.reshape(n, n)
 
     views = {
         "openness": sc.Filters(),
@@ -112,7 +115,8 @@ def main():
     for name, f in views.items():
         r = sc.apply(sig, f)
         v = np.where(r["keep"], r["openness"], 0.0)
-        img = compose(v.reshape(n, n), terrain, args.obs_step, water=wat)
+        up = max(2, int(round(1100 / n)))
+        img = compose(v.reshape(n, n), terrain, args.obs_step, water=wat, upscale=up)
         p = IMG_OUT / f"{args.name}_{args.mode}_{name}.png"
         img.save(p)
         print(f"  {p.name}: {int(r['keep'].sum()):,} cells pass, "
@@ -120,9 +124,11 @@ def main():
 
         if name == "openness":
             rb = sc.robust(v, (n, n), radius_cells=1)
-            img = compose(rb.reshape(n, n), terrain, args.obs_step, water=wat)
+            img = compose(rb.reshape(n, n), terrain, args.obs_step, water=wat, upscale=up)
+            sep = max(3, int(round(args.core_km * 1000 / 10 / args.obs_step)))
+            spots = sc.top_spots(rb, (n, n), sig, n=args.spots, separation_cells=sep)
+            img = mark_spots(img, spots, ax[0], ax[0], ax[-1] - ax[0], up)
             img.save(IMG_OUT / f"{args.name}_{args.mode}_openness_robust.png")
-            spots = sc.top_spots(rb, (n, n), sig, n=10)
             m_lat, m_lon = metres_per_degree(lat0)
             print(f"\n  top 10 spots (worst view within 100 m, {args.mode} mode)")
             print(f"  {'#':>2} {'lat':>8} {'lon':>8} {'alt':>5} {'mean':>6} "

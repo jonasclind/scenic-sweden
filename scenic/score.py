@@ -74,17 +74,20 @@ def sunset_azimuth(lat_deg: float, day_of_year: int) -> float:
     return float(360.0 - sunrise)                # sunset mirrors sunrise about north
 
 
-def robust(values: np.ndarray, shape: tuple, radius_cells: int = 1) -> np.ndarray:
-    """Worst score within a neighbourhood.
+def robust(values: np.ndarray, shape: tuple, radius_cells: int = 1,
+           percentile: float = 25.0) -> np.ndarray:
+    """Score a location by how it holds up across its neighbourhood.
 
-    Around Alingsas the raw per-cell score is genuinely speckled: step 100 m and
-    a small rise can cost you 15 km of view. A spot you must stand on exactly is
-    not a plot and not a picnic site, so we rank on the worst view within a short
-    walk rather than the best view at a point.
+    Around Alingsas the raw per-cell score is genuinely speckled: step 100 m
+    over a small rise and you can lose 15 km of view, and the worst cells really
+    do see only ~140 m. A spot you must stand on exactly is not a plot, so we
+    rank on a low percentile of the neighbourhood rather than the value at a
+    point. Not the minimum: that is an extreme statistic, and a single blind cell
+    would blank everything around it.
     """
     from scipy import ndimage
-    return ndimage.minimum_filter(values.reshape(shape),
-                                  size=2 * radius_cells + 1).ravel()
+    return ndimage.percentile_filter(values.reshape(shape), percentile=percentile,
+                                     size=2 * radius_cells + 1).ravel()
 
 
 def top_spots(values: np.ndarray, shape: tuple, sig: Signatures, n: int = 10,
