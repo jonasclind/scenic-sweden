@@ -53,7 +53,16 @@ def main():
     ap.add_argument("--tile-lat", type=float, default=0.45)
     ap.add_argument("--tile-lon", type=float, default=0.75)
     ap.add_argument("--only", type=int, default=0, help="stop after N tiles (smoke test)")
+    ap.add_argument("--bbox", nargs=4, type=float, metavar=("LAT0", "LAT1", "LON0", "LON1"),
+                    help="override the region, for smoke tests")
+    ap.add_argument("--out", default=None, help="override output directory")
     args = ap.parse_args()
+
+    global LAT0, LAT1, LON0, LON1, OUT
+    if args.bbox:
+        LAT0, LAT1, LON0, LON1 = args.bbox
+    if args.out:
+        OUT = Path(args.out)
 
     lats, lons = region_grid()
     R, C = lats.size, lons.size
