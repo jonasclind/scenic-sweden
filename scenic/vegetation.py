@@ -11,9 +11,23 @@ actual canopy there averages 7.6 m, 28% of it is open ground, and 46% is under
 5 m. Eight metres of imagined forest is exactly the margin that decides whether
 you see over a slope.
 
-Two statistics, because the canopy answers two questions:
-  max   what stops a view - a ray grazing a forest meets the tallest trees.
-  mean  typical cover at a spot - whether you could stand there in the open.
+Both the blocking surface and the site filter read the *mean* statistic, for
+different reasons.
+
+For blocking it is the unbiased estimate of canopy height where a ray actually
+samples. The obvious alternative - the tallest pixel in the cell - sounds
+conservative and is badly wrong: it widens every isolated tree to the full 21 m
+cell, so a ray crossing farmland is stopped by trees it would have passed
+beside. Measured over 1,681 observers on open ground near Lund, the max
+statistic gives a median reach of 0.52 km where bare earth gives 5.51; the mean
+gives 2.19 km, which is what hedgerows and tree lines really cost you. In closed
+forest the two agree within a few metres, so little is given up where it counts.
+
+For the site filter it answers "could I stand here in the open", which is a
+question about typical cover, not about the one tall tree nearby.
+
+The max raster is still produced. It is the right input for a future
+worst-case mode, and it costs nothing extra to reduce.
 """
 from __future__ import annotations
 
@@ -111,7 +125,7 @@ def obstruction_height(grid: LocalGrid, canopy: CanopyRegion | None = None) -> n
     out = np.zeros(grid.z.shape, np.float32)
     cls = np.zeros(grid.z.shape, np.uint8)
     for sl, lon, lat in _bands(grid):
-        out[sl] = canopy.sample(lon, lat, "max")
+        out[sl] = canopy.sample(lon, lat, "mean")
         _landcover_class(grid, lat, lon, cls, sl)
     # Buildings are not in a canopy model, and WorldCover still knows where they
     # are. Take whichever is taller rather than adding them.
