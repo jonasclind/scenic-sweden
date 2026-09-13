@@ -175,9 +175,13 @@ function score(vwin, data) {
 let ramp;
 function draw(vwin, sc, top) {
   const { w, h, W, E, S, N, lv, x0, y0 } = vwin;
-  const aspect = (E - W) / Math.max(mercY(N) - mercY(S), 1e-9) * Math.cos(0);
+  // Both spans must be in Mercator units. Mercator x is proportional to
+  // longitude in RADIANS; comparing degrees against a Mercator y span made the
+  // canvas the wrong shape by a factor of ~57, collapsing one axis to a few
+  // pixels and banding the overlay when it was stretched back out.
   let cw = CANVAS_MAX, ch = CANVAS_MAX;
-  const spanX = E - W, spanY = mercY(N) - mercY(S);
+  const spanX = (E - W) * Math.PI / 180;
+  const spanY = mercY(N) - mercY(S);
   if (spanX / spanY > 1) ch = Math.max(64, Math.round(CANVAS_MAX * spanY / spanX));
   else cw = Math.max(64, Math.round(CANVAS_MAX * spanX / spanY));
 

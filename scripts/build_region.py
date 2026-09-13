@@ -84,6 +84,16 @@ def main():
             dist[(v, cm)] = mm(f"dist_{v}_{cm}.u8", (R, C, N_AZ), np.uint8)
             water[(v, cm)] = mm(f"water_{v}_{cm}.u32", (R, C), np.uint32)
 
+    # Written before any compute: it describes the grid, which is known from
+    # the constants, and downstream tools need it to read partial output. Only
+    # emitting it at the end also meant a crash lost it entirely.
+    (OUT / "region.json").write_text(json.dumps(dict(
+        lat0=float(lats[0]), lat1=float(lats[-1]),
+        lon0=float(lons[0]), lon1=float(lons[-1]),
+        rows=int(R), cols=int(C), azimuths=N_AZ, obs_m=OBS_M,
+        max_dist_km=VIEW_KM, canopy_m=CANOPY_M,
+        eyes=[dict(cm=cm, m=e) for cm, e in EYES], veg=VEG), indent=2))
+
     state_path = OUT / "progress.json"
     done = set(json.loads(state_path.read_text())["done"]) if state_path.exists() else set()
 
@@ -180,12 +190,6 @@ def main():
 
     for m in list(dist.values()) + list(water.values()) + [elev, valid]:
         m.flush()
-    (OUT / "region.json").write_text(json.dumps(dict(
-        lat0=float(lats[0]), lat1=float(lats[-1]),
-        lon0=float(lons[0]), lon1=float(lons[-1]),
-        rows=int(R), cols=int(C), azimuths=N_AZ, obs_m=OBS_M,
-        max_dist_km=VIEW_KM, canopy_m=CANOPY_M,
-        eyes=[dict(cm=cm, m=e) for cm, e in EYES], veg=VEG), indent=2))
     print(f"\ndone in {(time.time()-t_start)/60:.1f} min")
 
 
