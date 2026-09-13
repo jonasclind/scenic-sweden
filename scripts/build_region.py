@@ -57,6 +57,10 @@ def main():
     ap.add_argument("--bbox", nargs=4, type=float, metavar=("LAT0", "LAT1", "LON0", "LON1"),
                     help="override the region, for smoke tests")
     ap.add_argument("--out", default=None, help="override output directory")
+    ap.add_argument("--veg", nargs="+", choices=VEG, default=None,
+                    help="recompute only these vegetation states; the bare-earth "
+                         "results do not depend on the canopy, so a change to it "
+                         "need not redo them")
     args = ap.parse_args()
 
     global LAT0, LAT1, LON0, LON1, OUT
@@ -66,6 +70,7 @@ def main():
         OUT = Path(args.out)
 
     canopy = CanopyRegion()
+    veg_list = args.veg or VEG
     lats, lons = region_grid()
     R, C = lats.size, lons.size
     safe.ensure_dir(OUT)
@@ -162,7 +167,17 @@ def main():
         ox = ((LO - lon_c) * m_lon).ravel()
         oy = ((LA - lat_c) * m_lat).ravel()
 
-        for v in VEG:
+        g0 = grid.sample(ox, oy)
+        ow = grid.sample_nearest_bool(wmask, ox, oy)
+        elev[np.ix_(rows, cols)] = np.rint(
+            np.nan_to_num(g0, nan=-32768)).reshape(rows.size, cols.size)
+        valid[np.ix_(rows, cols)] = (
+            ~ow & np.isfinite(g0)).reshape(rows.size, cols.size)
+        site[np.ix_(rows, cols)] = np.clip(
+            canopy.sample(LO.ravel(), LA.ravel(), "mean"), 0, 255
+        ).astype(np.uint8).reshape(rows.size, cols.size)
+
+        for v in veg_list:
             sigs = compute_multi(grid, ox, oy, [e for _, e in EYES], n_azimuth=N_AZ,
                                  water_mask=wmask, max_dist=VIEW_KM * 1000,
                                  surface=surf if v == "trees" else None)
@@ -172,15 +187,6 @@ def main():
                 bits = (sg.water_far > 0).astype(np.uint32)
                 wm = (bits << np.arange(N_AZ, dtype=np.uint32)).sum(axis=1).astype(np.uint32)
                 water[(v, cm)][np.ix_(rows, cols)] = wm.reshape(rows.size, cols.size)
-            if v == VEG[0]:
-                sg = sigs[0]
-                site[np.ix_(rows, cols)] = np.clip(
-                    canopy.sample(LO.ravel(), LA.ravel(), "mean"), 0, 255
-                ).astype(np.uint8).reshape(rows.size, cols.size)
-                elev[np.ix_(rows, cols)] = np.rint(
-                    np.nan_to_num(sg.ground, nan=-32768)).reshape(rows.size, cols.size)
-                valid[np.ix_(rows, cols)] = (
-                    ~sg.on_water & np.isfinite(sg.ground)).reshape(rows.size, cols.size)
 
         done.add(key)
         done_here += 1
