@@ -2,3 +2,7 @@
 out/
 __pycache__/
 *.pyc
+
+# Generated data products: hundreds of MB now, gigabytes once the whole
+# region is built. Regenerate with scripts/export_*.py and build_region.py.
+web/layers/

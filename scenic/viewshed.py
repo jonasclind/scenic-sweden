@@ -124,3 +124,91 @@ def compute(grid: LocalGrid, ox: np.ndarray, oy: np.ndarray,
     return Signatures(x=ox, y=oy, ground=ground, horizon=horizon,
                       max_dist=max_d, water_near=w_near, water_far=w_far,
                       on_water=on_water, n_azimuth=n_azimuth)
+
+
+def compute_multi(grid: LocalGrid, ox: np.ndarray, oy: np.ndarray,
+                  eye_heights, n_azimuth: int = 32,
+                  water_mask: np.ndarray | None = None,
+                  max_dist: float = 20000.0, chunk: int = 32768,
+                  surface: LocalGrid | None = None,
+                  progress=None):
+    """Signatures for several eye heights in one pass over the terrain.
+
+    Sampling the surface along a ray is most of the cost - the arithmetic that
+    follows is a handful of vector ops on the same array. Computing each eye
+    height separately repeats that gather for identical points, so this shares
+    it: three heights cost far less than three runs.
+    """
+    ox = np.asarray(ox, dtype=np.float64).ravel()
+    oy = np.asarray(oy, dtype=np.float64).ravel()
+    eyes = [float(e) for e in eye_heights]
+    n, E = ox.size, len(eyes)
+    blocking = surface if surface is not None else grid
+
+    ds = radial_steps(max_dist=max_dist)
+    drops = (ds ** 2) / (2 * R_EFF)
+
+    ground = np.empty(n, np.float32)
+    on_water = np.zeros(n, bool)
+    horizon = [np.empty((n, n_azimuth), np.float32) for _ in eyes]
+    max_d = [np.empty((n, n_azimuth), np.float32) for _ in eyes]
+    w_near = [np.empty((n, n_azimuth), np.float32) for _ in eyes]
+    w_far = [np.empty((n, n_azimuth), np.float32) for _ in eyes]
+
+    thetas = 2 * np.pi * np.arange(n_azimuth) / n_azimuth
+    total = int(np.ceil(n / chunk)) * n_azimuth
+    done = 0
+
+    for s in range(0, n, chunk):
+        e = min(s + chunk, n)
+        cx, cy = ox[s:e], oy[s:e]
+        g = grid.sample(cx, cy)
+        ground[s:e] = g
+        if water_mask is not None:
+            on_water[s:e] = grid.sample_nearest_bool(water_mask, cx, cy)
+        z0s = [g.astype(np.float64) + h for h in eyes]
+
+        for a, th in enumerate(thetas):
+            dx, dy = np.sin(th), np.cos(th)
+            runs = [np.full(e - s, -np.inf) for _ in eyes]
+            mds = [np.zeros(e - s) for _ in eyes]
+            wns = [np.full(e - s, np.inf) for _ in eyes]
+            wfs = [np.zeros(e - s) for _ in eyes]
+
+            for d, drop in zip(ds, drops):
+                sx = cx + dx * d
+                sy = cy + dy * d
+                h = blocking.sample(sx, sy)          # the shared gather
+                hd = h - drop
+
+                viss, any_vis = [], None
+                for i in range(E):
+                    ang = (hd - z0s[i]) / d
+                    v = ang > runs[i]                # NaN compares False
+                    viss.append((ang, v))
+                    any_vis = v if any_vis is None else (any_vis | v)
+
+                if not any_vis.any():
+                    continue
+                wh = (grid.sample_nearest_bool(water_mask, sx, sy)
+                      if water_mask is not None else None)
+                for i, (ang, v) in enumerate(viss):
+                    mds[i] = np.where(v, d, mds[i])
+                    if wh is not None:
+                        w = v & wh
+                        wns[i] = np.where(w & np.isinf(wns[i]), d, wns[i])
+                        wfs[i] = np.where(w, d, wfs[i])
+                    runs[i] = np.where(v, ang, runs[i])
+
+            for i in range(E):
+                horizon[i][s:e, a] = runs[i]
+                max_d[i][s:e, a] = mds[i]
+                w_near[i][s:e, a] = wns[i]
+                w_far[i][s:e, a] = wfs[i]
+            done += 1
+            if progress and done % 32 == 0:
+                progress(done, total)
+
+    return [Signatures(x=ox, y=oy, ground=ground, horizon=horizon[i],
+                       max_dist=max_d[i], water_near=w_near[i], water_far=w_far[i],
+                       on_water=on_water, n_azimuth=n_azimuth) for i in range(E)]
