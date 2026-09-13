@@ -1,8 +1,8 @@
-import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js';
+import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=2';
 
 const CANVAS = 1024;                       // Mercator-aligned overlay resolution
-const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false };
-let D, data, wheel, range, map, markers = [], srcRow, srcCol, ramp;
+const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false, contours: true };
+let D, data, wheel, range, map, markers = [], srcRow, srcCol, ramp, elev;
 
 const BLANK = (() => {                       // a 1x1 transparent seed image
   const c = document.createElement('canvas'); c.width = c.height = 1;
@@ -47,6 +47,7 @@ function load(veg, eye) {
   data = await fetch('data.json').then(r => r.json());
   ramp = data.ramp.map(h => [1, 3, 5].map(i => parseInt(h.substr(i, 2), 16)));
   D = {};
+  elev = await bin('layers/elev.bin', Int16Array);
   await load(state.veg, state.eye);
   buildLookup();
   buildUI();
@@ -295,6 +296,14 @@ function buildUI() {
     await load(state.veg, state.eye);
     refresh();
   });
+  const cont = document.getElementById('contours');
+  cont.checked = state.contours;
+  cont.addEventListener('change', e => {
+    state.contours = e.target.checked;
+    for (const id of ['contour-minor', 'contour-major'])
+      map.setLayoutProperty(id, 'visibility', state.contours ? 'visible' : 'none');
+  });
+
   const clarity = document.getElementById('clarity');
   clarity.addEventListener('input', () => setClarity(+clarity.value));
 }
@@ -309,6 +318,16 @@ function renderTicks() {
     s.style.left = (range.pos(v) * 100) + '%';
     el.appendChild(s);
   }
+}
+
+/* Nearest sample from the shipped elevation grid. */
+function elevationAt(lat, lon) {
+  const [W, S, E, N] = data.bounds, n = data.n;
+  const x = Math.round((lon - W) / (E - W) * (n - 1));
+  const y = Math.round((lat - S) / (N - S) * (n - 1));
+  if (x < 0 || y < 0 || x >= n || y >= n) return 'outside the area';
+  const v = elev[y * n + x];
+  return v === -32768 ? 'no data' : `${v} m`;
 }
 
 /* One control, two halves. Below the midpoint the overlay fades in over an
@@ -341,6 +360,7 @@ function buildMap() {
         // An image source fed from a blob, not a canvas source. MapLibre's
         // canvas upload path drops per-texel alpha here, which painted the
         // whole box opaque black; the image path honours it.
+        contours: { type: 'geojson', data: 'layers/contours.geojson' },
         ov: { type: 'image', url: BLANK,
           coordinates: [[W, N], [E, N], [E, S], [W, S]] },
       },
@@ -354,6 +374,22 @@ function buildMap() {
           paint: { 'background-color': '#ffffff', 'background-opacity': 0 } },
         { id: 'ov', type: 'raster', source: 'ov',
           paint: { 'raster-opacity': 0.85, 'raster-fade-duration': 0 } },
+        // Above the overlay: contours are reference, and have to stay legible
+        // even when the clarity slider has the heatmap at full strength.
+        // Minor lines only once they are far enough apart to read: 10 m
+        // spacing across a 50 km view is an unreadable smear.
+        { id: 'contour-minor', type: 'line', source: 'contours',
+          filter: ['!', ['get', 'major']], minzoom: 11,
+          paint: {
+            'line-color': '#4a3f35', 'line-opacity': 0.45,
+            'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.5, 14, 1.0, 17, 1.6],
+          } },
+        { id: 'contour-major', type: 'line', source: 'contours',
+          filter: ['get', 'major'],
+          paint: {
+            'line-color': '#332c25', 'line-opacity': 0.7,
+            'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.7, 12, 1.4, 15, 2.2, 17, 3.0],
+          } },
       ],
     },
     center: [data.centre[1], data.centre[0]], zoom: 9.4,
@@ -371,10 +407,20 @@ function buildMap() {
   map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 120 }), 'bottom-left');
   map.on('load', () => { setClarity(+document.getElementById('clarity').value); refresh(); });
+  map.on('mousemove', e => {
+    const f = map.queryRenderedFeatures(e.point,
+      { layers: ['contour-major', 'contour-minor'] });
+    map.getCanvas().style.cursor = f.length ? 'crosshair' : '';
+    const el = document.getElementById('hover');
+    if (f.length) { el.hidden = false; el.textContent = `${f[0].properties.e} m`; }
+    else el.hidden = true;
+  });
+
   map.on('click', e => {
     if (e.originalEvent.target.closest('.spot')) return;
     const { lat, lng } = e.lngLat;
     new maplibregl.Popup().setLngLat(e.lngLat).setHTML(
+      `<b>${elevationAt(lat, lng)}</b><br>` +
       `${lat.toFixed(5)}, ${lng.toFixed(5)}<br>` +
       `<a target="_blank" rel="noopener noreferrer" href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lng.toFixed(5)}">open in Google Maps</a>`
     ).addTo(map);

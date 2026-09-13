@@ -26,6 +26,9 @@
   .seg button[aria-pressed="true"]{background:var(--accent);color:#fff;font-weight:500}
   .eyeseg button{padding:5px 2px;line-height:1.25}
   .eyeseg em{display:block;font-style:normal;font-size:10px;opacity:.65}
+  #hover{position:absolute;top:12px;right:12px;z-index:3;background:var(--surface);
+    border:1px solid var(--line);border-radius:6px;padding:4px 9px;font-size:11px;
+    color:var(--ink);font-variant-numeric:tabular-nums;box-shadow:0 2px 8px rgba(0,0,0,.12)}
   #busy{position:absolute;top:12px;left:276px;z-index:3;background:var(--surface);
     border:1px solid var(--line);border-radius:6px;padding:5px 10px;font-size:11px;
     color:var(--ink-2);box-shadow:0 2px 8px rgba(0,0,0,.12)}
@@ -63,6 +66,7 @@
 
 <div id="map"></div>
 <div id="busy" hidden>loading…</div>
+<div id="hover" hidden></div>
 <canvas id="ovcanvas"></canvas>
 
 <div class="panel">
@@ -118,6 +122,15 @@
   </div>
 
   <div class="grp">
+    <label class="chk">
+      <input type="checkbox" id="contours" checked>
+      <span>Elevation contours
+        <em>10 m lines, every 50 m heavier. Traced from the same terrain the
+            scores use, so they agree with the heatmap.</em></span>
+    </label>
+  </div>
+
+  <div class="grp">
     <div class="lbl">Basemap</div>
     <div class="seg" id="base">
       <button data-v="sat" aria-pressed="true">Satellite</button>
@@ -135,4 +148,9 @@
     </div>
   </div>
 
-<script type="module" src="app.js"></script>
+<script type="module">
+  // Dynamic import with a cache-buster. A browser's module map is separate
+  // from its HTTP cache, so a plain src= can keep running a stale module even
+  // after a reload - which looks exactly like the edit having had no effect.
+  import(`./app.js?t=${Date.now()}`);
+</script>

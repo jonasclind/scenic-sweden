@@ -28,8 +28,16 @@ Outputs: signatures to `/Volumes/T7/scenic/pilot/*.npz`, heatmaps to `out/*.png`
 
 ## The map
 
-    ./.venv/bin/python scripts/export_web.py      # recompute the four layers
-    ./.venv/bin/python -m http.server 8731 --directory web
+    ./.venv/bin/python scripts/export_web.py       # six signature sets, ~7 min
+    ./.venv/bin/python scripts/export_contours.py  # contours + elevation grid
+    ./.venv/bin/python scripts/serve.py 8731
+
+`serve.py` sends `no-store`. `python -m http.server` sends no cache headers at
+all, so browsers fall back to heuristic freshness and quietly keep running a
+stale `app.js` after you edit it - which looks exactly like your change having
+had no effect. `index.html` also imports `app.js` through a dynamic import with
+a cache-buster, because a browser's module map is a second cache that a plain
+reload does not clear.
 
 Then open http://localhost:8731.
 
@@ -49,6 +57,10 @@ Then open http://localhost:8731.
   (5 m). Six signature sets exist (three heights x two vegetation states, ~53 MB
   in total), so each is fetched the first time it is asked for rather than up
   front.
+- **Elevation contours** - 10 m lines, every 50 m heavier, traced from the same
+  DEM the scores come from so they agree with the heatmap exactly. Minor lines
+  appear from zoom 11; below that 10 m spacing across 50 km is a smear. Hovering
+  a line names its height, and clicking anywhere reports the ground elevation.
 - Satellite or OSM basemap, how-far-you-see vs sees-water, a checkbox that
   strips the forest, and the ten best spots as markers, each linking out to
   Google Maps in its own window.
