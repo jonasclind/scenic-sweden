@@ -22,7 +22,7 @@ import numpy as np
 from scenic import safe
 from scenic.grid import build_local_grid, metres_per_degree
 from scenic.tessadem import Mosaic
-from scenic.vegetation import CANOPY_M, obstruction_height, surface
+from scenic.vegetation import CANOPY_M, _tiles_for, obstruction_height, surface
 from scenic.viewshed import compute_multi
 from scenic.water import detect_water
 
@@ -89,6 +89,31 @@ def main():
 
     tiles = [(a, o) for a in np.arange(LAT0, LAT1, args.tile_lat)
              for o in np.arange(LON0, LON1, args.tile_lon)]
+
+    # Preflight every input the run will touch, including the halo. Discovering
+    # a missing landcover tile ten minutes in wastes the work already done; the
+    # halo reaches further than the region itself, which is exactly where the
+    # gap was.
+    # Mirror the half_km the loop below actually uses, rather than guessing a
+    # margin: too generous a pad demands tiles the run will never read.
+    _ml, _mo = metres_per_degree((LAT0 + LAT1) / 2)
+    _half_km = (np.hypot(args.tile_lat * _ml, args.tile_lon * _mo) / 2000) + VIEW_KM + 1
+    pad_lat = _half_km / (_ml / 1000)
+    pad_lon = _half_km / (_mo / 1000)
+    need_lc = sorted({p for p in _tiles_for(LAT0 - pad_lat, LAT1 + pad_lat,
+                                            LON0 - pad_lon, LON1 + pad_lon)})
+    gone = [p for p in need_lc if not p.exists()]
+    if gone:
+        raise SystemExit("missing landcover tiles:\n  " +
+                         "\n  ".join(p.name for p in gone))
+    dem_need = [(a, o) for a in range(int(np.floor(LAT0 - pad_lat)),
+                                      int(np.floor(LAT1 + pad_lat)) + 1)
+                for o in range(int(np.floor(LON0 - pad_lon)),
+                               int(np.floor(LON1 + pad_lon)) + 1)]
+    dem_have = sum(1 for a, o in dem_need if (DEM / f"{a}_{o}").exists())
+    print(f"preflight: {len(need_lc)} landcover tiles present, "
+          f"{dem_have}/{len(dem_need)} DEM tiles present "
+          f"(absent DEM reads as no-data, which only affects halo padding)")
     print(f"{len(tiles)} tiles, {len(done)} already done\n")
 
     t_start = time.time()
