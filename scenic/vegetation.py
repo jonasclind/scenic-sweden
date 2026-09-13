@@ -46,11 +46,13 @@ class CanopyRegion:
         self.mean = np.memmap(root / "canopy_mean.u8", dtype=np.uint8, mode="r", shape=shape)
 
     def _index(self, lon, lat):
+        # Longitude scales by half the world width; latitude scales by the
+        # earth radius. They differ by a factor of pi.
         m = self.meta
-        x = lon / 180.0 * m["R"]
-        y = np.log(np.tan(np.pi / 4 + np.radians(lat) / 2)) * m["R"]
-        c = np.rint((x + m["R"]) / m["cell"]).astype(np.int64) - m["col0"]
-        r = np.rint((m["R"] - y) / m["cell"]).astype(np.int64) - m["row0"]
+        x = lon / 180.0 * m["half"]
+        y = np.log(np.tan(np.pi / 4 + np.radians(lat) / 2)) * m["r_earth"]
+        c = np.rint((x + m["half"]) / m["cell"]).astype(np.int64) - m["col0"]
+        r = np.rint((m["half"] - y) / m["cell"]).astype(np.int64) - m["row0"]
         ok = (c >= 0) & (c < m["cols"]) & (r >= 0) & (r < m["rows"])
         return np.clip(r, 0, m["rows"] - 1), np.clip(c, 0, m["cols"] - 1), ok
 

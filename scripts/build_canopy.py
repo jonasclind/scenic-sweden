@@ -28,10 +28,15 @@ import rasterio
 
 from scenic import safe
 
-R = 20037508.342789244
+# Web Mercator needs two different constants and they are easy to confuse:
+# HALF is half the world width (pi * earth radius) and scales longitude, while
+# the y formula scales by the earth radius itself. Using HALF for both puts
+# every row out by a factor of pi.
+HALF = 20037508.342789244
+R_EARTH = 6378137.0
 TILES_ACROSS = 512                      # the source tiles are a z9 grid
 SUB = 2048                              # target cells per tile edge
-CELL = 2 * R / (TILES_ACROSS * SUB)     # ~38.2 Mercator m, ~21 m on the ground here
+CELL = 2 * HALF / (TILES_ACROSS * SUB)  # ~38.2 Mercator m, ~21 m on the ground here
 STRIPE = 512                            # source rows per read
 
 SRC = Path("/Volumes/T7/scenic/canopy")
@@ -41,8 +46,8 @@ PAD = 0.55
 
 
 def merc(lon, lat):
-    x = lon / 180.0 * R
-    y = np.log(np.tan(np.pi / 4 + np.radians(lat) / 2)) * R
+    x = lon / 180.0 * HALF
+    y = np.log(np.tan(np.pi / 4 + np.radians(lat) / 2)) * R_EARTH
     return x, y
 
 
@@ -50,8 +55,8 @@ def main():
     safe.ensure_dir(OUT)
     x0, y0 = merc(LON0 - PAD, LAT0 - PAD)
     x1, y1 = merc(LON1 + PAD, LAT1 + PAD)
-    c0 = int(np.floor((x0 + R) / CELL)); c1 = int(np.ceil((x1 + R) / CELL))
-    r0 = int(np.floor((R - y1) / CELL)); r1 = int(np.ceil((R - y0) / CELL))
+    c0 = int(np.floor((x0 + HALF) / CELL)); c1 = int(np.ceil((x1 + HALF) / CELL))
+    r0 = int(np.floor((HALF - y1) / CELL)); r1 = int(np.ceil((HALF - y0) / CELL))
     W, H = c1 - c0, r1 - r0
     print(f"canopy raster {H} x {W} cells at {CELL:.2f} Mercator m "
           f"(~{CELL*np.cos(np.radians(57.2)):.1f} m on the ground)")
@@ -67,15 +72,16 @@ def main():
 
     tifs = sorted(SRC.glob("[0-9]*.tif"))
     print(f"{len(tifs)} source tiles, {len(done)} already reduced\n")
-    t_start, n_here = time.time(), 0
+    t_start, n_here, n_written = time.time(), 0, 0
 
     for p in tifs:
         if p.name in done:
             continue
         t0 = time.time()
         with rasterio.open(p) as src:
-            tc = int(round((src.bounds.left + R) / (2 * R / TILES_ACROSS)))
-            tr = int(round((R - src.bounds.top) / (2 * R / TILES_ACROSS)))
+            tw = 2 * HALF / TILES_ACROSS
+            tc = int(round((src.bounds.left + HALF) / tw))
+            tr = int(round((HALF - src.bounds.top) / tw))
             gc, gr = tc * SUB, tr * SUB                    # this tile's global cell origin
             # intersection with the region window
             ic0, ic1 = max(gc, c0), min(gc + SUB, c1)
@@ -83,6 +89,7 @@ def main():
             if ic0 >= ic1 or ir0 >= ir1:
                 done.add(p.name); state.write_text(json.dumps({"done": sorted(done)}))
                 continue
+            n_written += 1
 
             f = src.height // SUB                          # source px per target cell
             for tr_lo in range(ir0, ir1, STRIPE // f):
@@ -104,10 +111,18 @@ def main():
         print(f"[{len(done):2d}/{len(tifs)}] {p.stem}  {time.time()-t0:5.1f}s  "
               f"eta {left/60:5.1f} min", flush=True)
 
+    # A window that intersects nothing means the projection is wrong, not that
+    # the work is done. Failing loudly here is the difference between a bad
+    # build and a silent one: the first version of this scaled y by the wrong
+    # radius, matched no tile at all, and reported success in 0.0 minutes.
+    if n_written == 0 and len(done) < len(tifs):
+        raise SystemExit("no source tile intersected the region window - "
+                         "check the projection constants")
     for m in (cmax, cmean):
         m.flush()
     (OUT / "canopy.json").write_text(json.dumps(dict(
-        cell=CELL, col0=c0, row0=r0, cols=W, rows=H, R=R,
+        cell=CELL, col0=c0, row0=r0, cols=W, rows=H,
+        half=HALF, r_earth=R_EARTH,
         note="Web Mercator, aligned to the Meta z9 tile grid"), indent=2))
     print(f"\ndone in {(time.time()-t_start)/60:.1f} min")
 
