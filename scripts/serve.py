@@ -14,7 +14,20 @@ PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8731
 ROOT = Path(__file__).resolve().parents[1] / "web"
 
 
+REGION = Path("/Volumes/T7/scenic/region_web")
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
+    def translate_path(self, path):
+        # The packed region is gigabytes and lives on the T7, not in the repo.
+        if path.startswith("/region/"):
+            rel = path[len("/region/"):].split("?", 1)[0].lstrip("/")
+            target = (REGION / rel).resolve()
+            if REGION.resolve() in target.parents or target == REGION.resolve():
+                return str(target)
+            return str(REGION)          # refuse to escape the region directory
+        return super().translate_path(path)
+
     def end_headers(self):
         self.send_header("Cache-Control", "no-store, must-revalidate")
         self.send_header("Pragma", "no-cache")

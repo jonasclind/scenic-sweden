@@ -1,226 +1,284 @@
-import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=2';
+import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=3';
 
-const CANVAS = 1024;                       // Mercator-aligned overlay resolution
+/* The region is 91,000 km2 and one signature set is 294 MB, so nothing here
+ * loads the whole thing. Two levels of tiles are fetched for whatever is on
+ * screen, and the overlay is rendered for the current viewport rather than as
+ * one fixed image over the region. */
+
+const CANVAS_MAX = 1100;          // long edge of the overlay bitmap
+const CELL_BUDGET = 700 * 700;    // cells we will score for one frame
+
 const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false, contours: true };
-let D, data, wheel, range, map, markers = [], srcRow, srcCol, ramp, elev;
+let meta, wheel, range, map, markers = [];
+const cache = new Map();
+const inflight = new Map();
+let objUrl = null, pending = false;
 
-const BLANK = (() => {                       // a 1x1 transparent seed image
+const BLANK = (() => {
   const c = document.createElement('canvas'); c.width = c.height = 1;
   return c.toDataURL();
 })();
-let objUrl = null;
-
 const mercY = lat => Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360));
 const invMercY = y => (2 * Math.atan(Math.exp(y)) - Math.PI / 2) * 180 / Math.PI;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
-const bin = (p, T) => fetch(p).then(r => r.arrayBuffer()).then(b => new T(b));
+/* ---------------------------------------------------------------- loading */
 
-/* Six combinations of vegetation and eye height come to about 56 MB, so a set
- * is fetched the first time it is asked for and kept thereafter.
- *
- * In-flight fetches are tracked separately from finished ones: the set object
- * only exists once its awaits resolve, so keying off it alone would let two
- * quick clicks fetch the same 9 MB twice. */
-const inflight = {};
-
-function load(veg, eye) {
-  const key = `${veg}_${eye}`;
-  if (D[key]) return Promise.resolve(D[key]);
-  if (inflight[key]) return inflight[key];
-
-  const busy = document.getElementById('busy');
-  if (busy) busy.hidden = false;
-  inflight[key] = Promise.all([
-    bin(`layers/dist_${key}.bin`, Uint8Array),
-    bin(`layers/water_${key}.bin`, Uint32Array),
-    bin(`layers/valid_${key}.bin`, Uint8Array),
-  ]).then(([dist, water, valid]) => {
-    D[key] = { dist, water, valid };
-    delete inflight[key];
-    if (busy && !Object.keys(inflight).length) busy.hidden = true;
-    return D[key];
-  });
-  return inflight[key];
+function tileShape(L, iy, ix) {
+  const lv = meta.levels[L];
+  return [Math.min(lv.tile_rows, lv.rows - iy * lv.tile_rows),
+          Math.min(lv.tile_cols, lv.cols - ix * lv.tile_cols)];
 }
 
-(async function () {
-  data = await fetch('data.json').then(r => r.json());
-  ramp = data.ramp.map(h => [1, 3, 5].map(i => parseInt(h.substr(i, 2), 16)));
-  D = {};
-  elev = await bin('layers/elev.bin', Int16Array);
-  await load(state.veg, state.eye);
-  buildLookup();
-  buildUI();
-  buildMap();
-})();
+function loadParts(key, L, iy, ix, parts) {
+  if (inflight.has(key)) return;
+  const base = `region/L${L}/${iy}_${ix}/`;
+  inflight.set(key, Promise.all(parts.map(([f, T]) =>
+    fetch(base + f + '.bin').then(r => {
+      if (!r.ok) throw new Error(r.status + ' ' + base + f);
+      return r.arrayBuffer();
+    }).then(b => new T(b))
+  )).then(vals => {
+    const o = {};
+    parts.forEach(([f], i) => { o[f.split('_')[0]] = vals[i]; });
+    cache.set(key, o);
+    inflight.delete(key);
+    scheduleRender();
+  }).catch(e => {
+    inflight.delete(key);
+    cache.set(key, null);              // missing tile: treat as empty, not retried
+    console.warn('tile unavailable', key, e.message);
+  }));
+}
 
-/* Mercator is separable, so one row table and one column table suffice. */
-function buildLookup() {
-  const [W, S, E, N] = data.bounds, n = data.n;
-  srcRow = new Int32Array(CANVAS);
-  srcCol = new Int32Array(CANVAS);
-  const myN = mercY(N), myS = mercY(S);
-  for (let j = 0; j < CANVAS; j++) {
-    const lat = invMercY(myN + (j / (CANVAS - 1)) * (myS - myN));
-    const f = (lat - S) / (N - S) * (n - 1);          // data row 0 is the south edge
-    srcRow[j] = Math.max(0, Math.min(n - 1, Math.round(f)));
-  }
-  for (let i = 0; i < CANVAS; i++) {
-    const f = (i / (CANVAS - 1)) * (n - 1);
-    srcCol[i] = Math.max(0, Math.min(n - 1, Math.round(f)));
+/** Returns the tile if resident, otherwise starts fetching and returns null. */
+function tile(L, iy, ix) {
+  const combo = `${state.veg}_${state.eye}`;
+  const kd = `${L}/${iy}/${ix}/${combo}`, kb = `${L}/${iy}/${ix}/base`;
+  if (!cache.has(kd)) loadParts(kd, L, iy, ix,
+    [[`dist_${combo}`, Uint8Array], [`water_${combo}`, Uint32Array]]);
+  if (!cache.has(kb)) loadParts(kb, L, iy, ix,
+    [['valid', Uint8Array], ['elev', Int16Array]]);
+  const d = cache.get(kd), b = cache.get(kb);
+  return (d && b) ? { ...d, ...b } : null;
+}
+
+/* ------------------------------------------------------------- view window */
+
+function viewWindow() {
+  const b = map.getBounds();
+  const W = Math.max(b.getWest(), meta.lon0), E = Math.min(b.getEast(), meta.lon1);
+  const S = Math.max(b.getSouth(), meta.lat0), N = Math.min(b.getNorth(), meta.lat1);
+  if (E <= W || N <= S) return null;
+
+  let L = map.getZoom() >= meta.detail_min_zoom ? 1 : 0;
+  for (;;) {
+    const lv = meta.levels[L];
+    const x0 = clamp(Math.floor((W - lv.lon0) / lv.dlon), 0, lv.cols - 1);
+    const x1 = clamp(Math.ceil((E - lv.lon0) / lv.dlon), 0, lv.cols - 1);
+    const y0 = clamp(Math.floor((S - lv.lat0) / lv.dlat), 0, lv.rows - 1);
+    const y1 = clamp(Math.ceil((N - lv.lat0) / lv.dlat), 0, lv.rows - 1);
+    const w = x1 - x0 + 1, h = y1 - y0 + 1;
+    // Too much to score in a frame: drop to the coarser level rather than
+    // freezing the page.
+    if (w * h > CELL_BUDGET && L > 0) { L--; continue; }
+    return { L, lv, x0, x1, y0, y1, w, h, W, E, S, N };
   }
 }
+
+/** Copy the visible rectangle out of whatever tiles are resident. */
+function gather(vwin) {
+  const { L, lv, x0, y0, w, h } = vwin;
+  const A = meta.azimuths;
+  const dist = new Uint8Array(w * h * A);
+  const water = new Uint32Array(w * h);
+  const valid = new Uint8Array(w * h);
+  const elev = new Int16Array(w * h);
+  let missing = 0;
+
+  const iy0 = Math.floor(y0 / lv.tile_rows), iy1 = Math.floor(vwin.y1 / lv.tile_rows);
+  const ix0 = Math.floor(x0 / lv.tile_cols), ix1 = Math.floor(vwin.x1 / lv.tile_cols);
+  for (let iy = iy0; iy <= iy1; iy++) {
+    for (let ix = ix0; ix <= ix1; ix++) {
+      const t = tile(L, iy, ix);
+      if (!t) { missing++; continue; }
+      const [th, tw] = tileShape(L, iy, ix);
+      const ty = iy * lv.tile_rows, tx = ix * lv.tile_cols;
+      const ys = Math.max(y0, ty), ye = Math.min(vwin.y1, ty + th - 1);
+      const xs = Math.max(x0, tx), xe = Math.min(vwin.x1, tx + tw - 1);
+      for (let y = ys; y <= ye; y++) {
+        const srcRow = (y - ty) * tw, dstRow = (y - y0) * w;
+        for (let x = xs; x <= xe; x++) {
+          const si = srcRow + (x - tx), di = dstRow + (x - x0);
+          water[di] = t.water[si];
+          valid[di] = t.valid[si];
+          elev[di] = t.elev[si];
+          dist.set(t.dist.subarray(si * A, si * A + A), di * A);
+        }
+      }
+    }
+  }
+  return { dist, water, valid, elev, missing };
+}
+
+/* ----------------------------------------------------------------- scoring */
 
 function selection() {
-  const A = data.azimuths, bins = [];
+  const A = meta.azimuths, bins = [];
   let mask = 0;
-  for (let b = 0; b < A; b++) {
+  for (let b = 0; b < A; b++)
     if (wheel.covers(b * 360 / A)) { bins.push(b); mask |= (1 << b); }
-  }
   return { bins, mask };
 }
 
-function computeScore() {
-  const n = data.n, A = data.azimuths, cells = n * n;
-  if (!D[`${state.veg}_${state.eye}`]) return new Float32Array(cells);
+function score(vwin, data) {
+  const { w, h, lv } = vwin, A = meta.azimuths, n = w * h;
   const { bins, mask } = selection();
-  const d = D[`${state.veg}_${state.eye}`], k = data.max_dist_km * 1000 / 255;
-  const raw = new Float32Array(cells);
-  const loM = range.lo * 1000;
-  const hiM = range.capped() ? Infinity : range.hi * 1000;
+  const k = meta.max_dist_km * 1000 / 255;
+  const loM = range.lo * 1000, hiM = range.capped() ? Infinity : range.hi * 1000;
+  const raw = new Float32Array(n);
 
-  for (let c = 0; c < cells; c++) {
-    if (!d.valid[c]) continue;
-    if (state.waterOnly && !(d.water[c] & mask)) continue;
-    let sum = 0, base = c * A;
-    for (let i = 0; i < bins.length; i++) sum += d.dist[base + bins[i]];
+  for (let c = 0; c < n; c++) {
+    if (!data.valid[c]) continue;
+    if (state.waterOnly && !(data.water[c] & mask)) continue;
+    let sum = 0; const base = c * A;
+    for (let i = 0; i < bins.length; i++) sum += data.dist[base + bins[i]];
     const v = sum / bins.length * k;
     raw[c] = (v >= loM && v <= hiM) ? v : 0;
   }
 
-  // 25th percentile over a 3x3 patch: the score must hold up across a plot, not
-  // at a point, and a single blind cell must not condemn its neighbours.
-  const out = new Float32Array(cells);
-  const w = new Float32Array(9);
-  for (let y = 1; y < n - 1; y++) {
-    for (let x = 1; x < n - 1; x++) {
+  // Hold-up-across-a-plot filter, radius in metres. At coarse levels one cell
+  // is already wider than the radius, so filtering there would smooth over
+  // kilometres - skip it rather than pretend.
+  const r = Math.round(50 / lv.step_m);
+  if (r < 1) return raw;
+  const out = new Float32Array(n), win = new Float32Array((2 * r + 1) ** 2);
+  for (let y = r; y < h - r; y++) {
+    for (let x = r; x < w - r; x++) {
       let m = 0;
-      for (let dy = -1; dy <= 1; dy++)
-        for (let dx = -1; dx <= 1; dx++) w[m++] = raw[(y + dy) * n + x + dx];
-      for (let i = 0; i < 3; i++) {                 // partial selection sort
+      for (let dy = -r; dy <= r; dy++)
+        for (let dx = -r; dx <= r; dx++) win[m++] = raw[(y + dy) * w + x + dx];
+      const q = Math.floor(m * 0.25);
+      for (let i = 0; i <= q; i++) {
         let mi = i;
-        for (let j = i + 1; j < 9; j++) if (w[j] < w[mi]) mi = j;
-        const t = w[i]; w[i] = w[mi]; w[mi] = t;
+        for (let j = i + 1; j < m; j++) if (win[j] < win[mi]) mi = j;
+        const t = win[i]; win[i] = win[mi]; win[mi] = t;
       }
-      out[y * n + x] = w[2];
+      out[y * w + x] = win[q];
     }
   }
   return out;
 }
 
-function draw(score, top) {
+/* ----------------------------------------------------------------- drawing */
+
+let ramp;
+function draw(vwin, sc, top) {
+  const { w, h, W, E, S, N, lv, x0, y0 } = vwin;
+  const aspect = (E - W) / Math.max(mercY(N) - mercY(S), 1e-9) * Math.cos(0);
+  let cw = CANVAS_MAX, ch = CANVAS_MAX;
+  const spanX = E - W, spanY = mercY(N) - mercY(S);
+  if (spanX / spanY > 1) ch = Math.max(64, Math.round(CANVAS_MAX * spanY / spanX));
+  else cw = Math.max(64, Math.round(CANVAS_MAX * spanX / spanY));
+
   const cv = document.getElementById('ovcanvas');
+  cv.width = cw; cv.height = ch;
   const ctx = cv.getContext('2d');
-  const img = ctx.createImageData(CANVAS, CANVAS);
+  const img = ctx.createImageData(cw, ch);
   const px = img.data;
-  // When the upper handle is at "and above" there is no ceiling to colour
-  // against, and using the slider's 20 km would paint every survivor in the
-  // palest step - worst for exactly the spots the filter just isolated. Colour
-  // against what is actually on screen instead.
   const lo = range.lo * 1000;
   const hi = range.capped() ? Math.max(top, lo + 500) : range.hi * 1000;
-  const n = data.n, last = ramp.length - 1;
+  const last = ramp.length - 1;
+  const myN = mercY(N), myS = mercY(S);
 
-  for (let j = 0; j < CANVAS; j++) {
-    const row = srcRow[j] * n, o = j * CANVAS * 4;
-    for (let i = 0; i < CANVAS; i++) {
-      const v = score[row + srcCol[i]], p = o + i * 4;
+  for (let j = 0; j < ch; j++) {
+    const lat = invMercY(myN + (j / (ch - 1)) * (myS - myN));
+    const gy = Math.round((lat - lv.lat0) / lv.dlat) - y0;
+    const o = j * cw * 4;
+    if (gy < 0 || gy >= h) { for (let i = 0; i < cw; i++) px[o + i * 4 + 3] = 0; continue; }
+    const row = gy * w;
+    for (let i = 0; i < cw; i++) {
+      const lon = W + (i / (cw - 1)) * (E - W);
+      const gx = Math.round((lon - lv.lon0) / lv.dlon) - x0;
+      const p = o + i * 4;
+      if (gx < 0 || gx >= w) { px[p + 3] = 0; continue; }
+      const v = sc[row + gx];
       if (!(v > 0)) { px[p + 3] = 0; continue; }
-      // sqrt to match the slider: the distribution is long-tailed
-      const t = Math.sqrt(Math.max(0, Math.min(1, (v - lo) / (hi - lo))));
-      const f = t * last, k = Math.min(last - 1, f | 0), g = f - k;
-      px[p]     = ramp[k][0] + (ramp[k + 1][0] - ramp[k][0]) * g;
-      px[p + 1] = ramp[k][1] + (ramp[k + 1][1] - ramp[k][1]) * g;
-      px[p + 2] = ramp[k][2] + (ramp[k + 1][2] - ramp[k][2]) * g;
+      const t = Math.sqrt(clamp((v - lo) / (hi - lo), 0, 1));
+      const f = t * last, kk = Math.min(last - 1, f | 0), g = f - kk;
+      px[p]     = ramp[kk][0] + (ramp[kk + 1][0] - ramp[kk][0]) * g;
+      px[p + 1] = ramp[kk][1] + (ramp[kk + 1][1] - ramp[kk][1]) * g;
+      px[p + 2] = ramp[kk][2] + (ramp[kk + 1][2] - ramp[kk][2]) * g;
       px[p + 3] = (0.25 + 0.60 * t) * 255;
     }
   }
   ctx.putImageData(img, 0, 0);
+
+  const src = map.getSource('ov');
+  if (src) {
+    cv.toBlob(b => {
+      const url = URL.createObjectURL(b);
+      src.updateImage({ url, coordinates: [[W, N], [E, N], [E, S], [W, S]] });
+      const stale = objUrl;
+      if (stale) setTimeout(() => URL.revokeObjectURL(stale), 4000);
+      objUrl = url;
+    }, 'image/png');
+  }
 }
 
-function topSpots(score, count = 10, sep = 20) {
-  const n = data.n, a = Float32Array.from(score), out = [];
-  const [W, S, E, N] = data.bounds;
+function topSpots(vwin, sc, count = 10) {
+  const { w, h, lv, x0, y0 } = vwin;
+  const sep = Math.max(3, Math.round(2000 / lv.step_m));
+  const a = Float32Array.from(sc), out = [];
   for (let k = 0; k < count; k++) {
-    let best = -1, bi = -1;
+    let best = 0, bi = -1;
     for (let c = 0; c < a.length; c++) if (a[c] > best) { best = a[c]; bi = c; }
-    if (!(best > 0)) break;
-    const y = (bi / n) | 0, x = bi % n;
-    out.push({
-      km: best / 1000,
-      lat: S + (y / (n - 1)) * (N - S),
-      lon: W + (x / (n - 1)) * (E - W),
-    });
+    if (bi < 0) break;
+    const y = (bi / w) | 0, x = bi % w;
+    out.push({ km: best / 1000,
+               lat: lv.lat0 + (y + y0) * lv.dlat,
+               lon: lv.lon0 + (x + x0) * lv.dlon });
     for (let dy = -sep; dy <= sep; dy++) {
-      const yy = y + dy; if (yy < 0 || yy >= n) continue;
+      const yy = y + dy; if (yy < 0 || yy >= h) continue;
       for (let dx = -sep; dx <= sep; dx++) {
-        const xx = x + dx; if (xx < 0 || xx >= n) continue;
-        a[yy * n + xx] = -1;
+        const xx = x + dx; if (xx < 0 || xx >= w) continue;
+        a[yy * w + xx] = 0;
       }
     }
   }
   return out;
 }
 
-let pending = false, pushing = false, queued = false;
+/* ------------------------------------------------------------------- frame */
 
-/* Hand the new overlay to the map, one at a time.
- *
- * Dragging a control can produce a new image every frame, and each call to
- * updateImage cancels the previous fetch - which surfaced as a stream of
- * unhandled AbortErrors. Only one push is ever in flight, and the image is
- * decoded before the map is asked for it, so the map's own fetch comes
- * straight from cache and there is nothing left to cancel. */
-function pushOverlay() {
-  const src = map && map.getSource('ov');
-  if (!src) return;
-  if (pushing) { queued = true; return; }
-  pushing = true;
-  document.getElementById('ovcanvas').toBlob(b => {
-    const url = URL.createObjectURL(b);
-    const im = new Image();
-    im.onload = im.onerror = () => {
-      src.updateImage({ url });
-      const stale = objUrl;
-      objUrl = url;
-      if (stale) setTimeout(() => URL.revokeObjectURL(stale), 4000);
-      pushing = false;
-      if (queued) { queued = false; pushOverlay(); }
-    };
-    im.src = url;
-  }, 'image/png');
-}
-function refresh() {
+let lastElev = null;
+function scheduleRender() {
   if (pending) return;
   pending = true;
   requestAnimationFrame(() => {
     pending = false;
+    if (!map || !map.isStyleLoaded()) { setTimeout(scheduleRender, 120); return; }
     const t0 = performance.now();
-    const score = computeScore();
+    const vwin = viewWindow();
+    const stat = document.getElementById('stat');
+    if (!vwin) { stat.textContent = 'outside the region'; return; }
+    const data = gather(vwin);
+    lastElev = { vwin, elev: data.elev };
+    const sc = score(vwin, data);
     let top = 0;
-    for (let i = 0; i < score.length; i++) if (score[i] > top) top = score[i];
-    draw(score, top);
-    const spots = topSpots(score);
-
-    pushOverlay();
-    if (map) placeMarkers(spots);
+    for (let i = 0; i < sc.length; i++) if (sc[i] > top) top = sc[i];
+    draw(vwin, sc, top);
+    const spots = topSpots(vwin, sc);
+    placeMarkers(spots);
+    document.getElementById('busy').hidden = inflight.size === 0;
 
     const sp = wheel.span();
-    const n = spots.length;
-    document.getElementById('stat').innerHTML =
-      `${sp >= 359.8 ? 'all directions' : `${wheel.start.toFixed(0)}°–${wheel.end.toFixed(0)}° (${sp.toFixed(0)}° wide)`}`
-      + ` &middot; best ${n ? spots[0].km.toFixed(1) : '—'} km`
-      + `<span class="dim"> &middot; ${(performance.now() - t0).toFixed(0)} ms</span>`;
+    stat.innerHTML =
+      (sp >= 359.8 ? 'all directions'
+        : `${wheel.start.toFixed(0)}°–${wheel.end.toFixed(0)}° (${sp.toFixed(0)}°)`)
+      + ` · best ${spots.length ? spots[0].km.toFixed(1) : '—'} km`
+      + `<span class="dim"> · ${vwin.lv.step_m} m grid · ${(performance.now() - t0) | 0} ms`
+      + (data.missing ? ` · ${data.missing} tiles loading` : '') + '</span>';
   });
 }
 
@@ -228,111 +286,25 @@ function placeMarkers(spots) {
   markers.forEach(m => m.remove());
   markers = spots.map((sp, i) => {
     const el = document.createElement('div');
-    el.className = 'spot';
-    el.textContent = i + 1;
+    el.className = 'spot'; el.textContent = i + 1;
     const pop = new maplibregl.Popup({ offset: 14 }).setHTML(
-      `<b>#${i + 1} &mdash; ${sp.km.toFixed(1)} km</b><br>` +
-      `${sp.lat.toFixed(5)}, ${sp.lon.toFixed(5)}<br>` +
+      `<b>#${i + 1} — ${sp.km.toFixed(1)} km</b><br>${sp.lat.toFixed(5)}, ${sp.lon.toFixed(5)}<br>` +
       `<a target="_blank" rel="noopener noreferrer" href="https://www.google.com/maps/search/?api=1&query=${sp.lat.toFixed(5)},${sp.lon.toFixed(5)}">open in Google Maps</a>`);
     return new maplibregl.Marker({ element: el }).setLngLat([sp.lon, sp.lat])
       .setPopup(pop).addTo(map);
   });
 }
 
-function buildUI() {
-  document.querySelector('#range .fill').style.background =
-    `linear-gradient(90deg, ${data.ramp.join(',')})`;
-  document.getElementById('canopy').textContent = data.canopy_m;
-
-  const cv = document.getElementById('ovcanvas');
-  cv.width = cv.height = CANVAS;
-
-  wheel = new DirectionWheel(document.getElementById('wheel'), refresh);
-  range = new RangeSlider(document.getElementById('range'), {
-    max: data.max_dist_km, lo: 0, hi: data.max_dist_km, onChange: refresh });
-  renderTicks();
-  window.range = range; window.wheel = wheel;   // handy from the console
-
-  document.getElementById('presets').addEventListener('click', ev => {
-    const b = ev.target.closest('button'); if (!b) return;
-    const v = b.dataset.v;
-    if (v === 'all') wheel.set(0, 359.9);
-    else if (v === 'sunset') {
-      const doy = Math.floor((Date.now() - Date.UTC(new Date().getFullYear(), 0, 0)) / 864e5);
-      const az = sunsetAzimuth(data.centre[0], doy);
-      wheel.set(az - 25, az + 25);
-    } else { const a = +v; wheel.set(a - 45, a + 45); }
-  });
-
-  for (const grp of ['base', 'view'])
-    document.getElementById(grp).addEventListener('click', ev => {
-      const b = ev.target.closest('button'); if (!b) return;
-      [...ev.currentTarget.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
-      if (grp === 'base') {
-        state.base = b.dataset.v;
-        map.setLayoutProperty('base-sat', 'visibility', state.base === 'sat' ? 'visible' : 'none');
-        map.setLayoutProperty('base-osm', 'visibility', state.base === 'osm' ? 'visible' : 'none');
-      } else { state.waterOnly = b.dataset.v === 'water'; refresh(); }
-    });
-
-  document.getElementById('bare').addEventListener('change', async e => {
-    state.veg = e.target.checked ? 'bare' : 'trees';
-    await load(state.veg, state.eye);
-    refresh();
-  });
-
-  const eyes = document.getElementById('eye');
-  for (const e of data.eyes) {
-    const b = document.createElement('button');
-    b.dataset.v = e.cm;
-    b.setAttribute('aria-pressed', String(e.cm === state.eye));
-    b.innerHTML = `${e.label}<em>${e.m} m</em>`;
-    eyes.appendChild(b);
-  }
-  eyes.addEventListener('click', async ev => {
-    const b = ev.target.closest('button'); if (!b) return;
-    [...eyes.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
-    state.eye = +b.dataset.v;
-    await load(state.veg, state.eye);
-    refresh();
-  });
-  const cont = document.getElementById('contours');
-  cont.checked = state.contours;
-  cont.addEventListener('change', e => {
-    state.contours = e.target.checked;
-    for (const id of ['contour-minor', 'contour-major'])
-      map.setLayoutProperty(id, 'visibility', state.contours ? 'visible' : 'none');
-  });
-
-  const clarity = document.getElementById('clarity');
-  clarity.addEventListener('input', () => setClarity(+clarity.value));
-}
-
-/* Ticks sit at their square-root positions so they line up with the slider. */
-function renderTicks() {
-  const el = document.getElementById('ticks');
-  el.innerHTML = '';
-  for (const v of [0, 1, 2, 5, 10, 20]) {
-    const s = document.createElement('span');
-    s.textContent = v;
-    s.style.left = (range.pos(v) * 100) + '%';
-    el.appendChild(s);
-  }
-}
-
-/* Nearest sample from the shipped elevation grid. */
 function elevationAt(lat, lon) {
-  const [W, S, E, N] = data.bounds, n = data.n;
-  const x = Math.round((lon - W) / (E - W) * (n - 1));
-  const y = Math.round((lat - S) / (N - S) * (n - 1));
-  if (x < 0 || y < 0 || x >= n || y >= n) return 'outside the area';
-  const v = elev[y * n + x];
+  if (!lastElev) return '';
+  const { vwin, elev } = lastElev, lv = vwin.lv;
+  const gy = Math.round((lat - lv.lat0) / lv.dlat) - vwin.y0;
+  const gx = Math.round((lon - lv.lon0) / lv.dlon) - vwin.x0;
+  if (gy < 0 || gx < 0 || gy >= vwin.h || gx >= vwin.w) return 'outside the region';
+  const v = elev[gy * vwin.w + gx];
   return v === -32768 ? 'no data' : `${v} m`;
 }
 
-/* One control, two halves. Below the midpoint the overlay fades in over an
- * untouched basemap; above it the overlay is already solid, so further travel
- * whitens the basemap instead. The midpoint is both at full strength. */
 function setClarity(v) {
   const overlay = v <= 50 ? v / 50 : 1;
   const veil = v <= 50 ? 0 : (v - 50) / 50;
@@ -344,8 +316,90 @@ function setClarity(v) {
     veil > 0 ? `map faded ${Math.round(veil * 100)}%` : `overlay ${Math.round(overlay * 100)}%`;
 }
 
+/* -------------------------------------------------------------------- boot */
+
+(async function () {
+  meta = await fetch('region/meta.json').then(r => r.json());
+  ramp = ['#FEF0D9', '#FDD9A0', '#F9B85C', '#EE9024', '#CF6B0B', '#9C4A07']
+    .map(h => [1, 3, 5].map(i => parseInt(h.substr(i, 2), 16)));
+  meta.ramp = ['#FEF0D9', '#FDD9A0', '#F9B85C', '#EE9024', '#CF6B0B', '#9C4A07'];
+  buildUI();
+  buildMap();
+})();
+
+function buildUI() {
+  document.querySelector('#range .fill').style.background =
+    `linear-gradient(90deg, ${meta.ramp.join(',')})`;
+  document.getElementById('canopy').textContent = meta.canopy_m;
+
+  wheel = new DirectionWheel(document.getElementById('wheel'), scheduleRender);
+  range = new RangeSlider(document.getElementById('range'), {
+    max: meta.max_dist_km, lo: 0, hi: meta.max_dist_km, onChange: scheduleRender });
+  window.range = range; window.wheel = wheel;
+  renderTicks();
+
+  document.getElementById('presets').addEventListener('click', ev => {
+    const b = ev.target.closest('button'); if (!b) return;
+    const v = b.dataset.v;
+    if (v === 'all') wheel.set(0, 359.9);
+    else if (v === 'sunset') {
+      const doy = Math.floor((Date.now() - Date.UTC(new Date().getFullYear(), 0, 0)) / 864e5);
+      const az = sunsetAzimuth((meta.lat0 + meta.lat1) / 2, doy);
+      wheel.set(az - 25, az + 25);
+    } else { const a = +v; wheel.set(a - 45, a + 45); }
+  });
+
+  const eyes = document.getElementById('eye');
+  for (const e of meta.eyes) {
+    const b = document.createElement('button');
+    b.dataset.v = e.cm;
+    b.setAttribute('aria-pressed', String(e.cm === state.eye));
+    b.innerHTML = `${e.cm === 0 ? 'Ground' : e.cm === 170 ? 'Standing' : 'Second floor'}<em>${e.m} m</em>`;
+    eyes.appendChild(b);
+  }
+  eyes.addEventListener('click', ev => {
+    const b = ev.target.closest('button'); if (!b) return;
+    [...eyes.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
+    state.eye = +b.dataset.v; scheduleRender();
+  });
+
+  for (const grp of ['base', 'view'])
+    document.getElementById(grp).addEventListener('click', ev => {
+      const b = ev.target.closest('button'); if (!b) return;
+      [...ev.currentTarget.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
+      if (grp === 'base') {
+        state.base = b.dataset.v;
+        map.setLayoutProperty('base-sat', 'visibility', state.base === 'sat' ? 'visible' : 'none');
+        map.setLayoutProperty('base-osm', 'visibility', state.base === 'osm' ? 'visible' : 'none');
+      } else { state.waterOnly = b.dataset.v === 'water'; scheduleRender(); }
+    });
+
+  document.getElementById('bare').addEventListener('change', e => {
+    state.veg = e.target.checked ? 'bare' : 'trees'; scheduleRender();
+  });
+  const cont = document.getElementById('contours');
+  cont.addEventListener('change', e => {
+    state.contours = e.target.checked;
+    for (const id of ['contour-minor', 'contour-major'])
+      if (map.getLayer(id))
+        map.setLayoutProperty(id, 'visibility', state.contours ? 'visible' : 'none');
+  });
+  const clarity = document.getElementById('clarity');
+  clarity.addEventListener('input', () => setClarity(+clarity.value));
+}
+
+function renderTicks() {
+  const el = document.getElementById('ticks');
+  el.innerHTML = '';
+  for (const v of [0, 1, 2, 5, 10, 20]) {
+    const s = document.createElement('span');
+    s.textContent = v;
+    s.style.left = (range.pos(v) * 100) + '%';
+    el.appendChild(s);
+  }
+}
+
 function buildMap() {
-  const [W, S, E, N] = data.bounds;
   map = new maplibregl.Map({
     container: 'map',
     style: {
@@ -357,71 +411,49 @@ function buildMap() {
         osm: { type: 'raster', tileSize: 256,
           tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
           attribution: '&copy; OpenStreetMap contributors' },
-        // An image source fed from a blob, not a canvas source. MapLibre's
-        // canvas upload path drops per-texel alpha here, which painted the
-        // whole box opaque black; the image path honours it.
         contours: { type: 'geojson', data: 'layers/contours.geojson' },
         ov: { type: 'image', url: BLANK,
-          coordinates: [[W, N], [E, N], [E, S], [W, S]] },
+          coordinates: [[meta.lon0, meta.lat1], [meta.lon1, meta.lat1],
+                        [meta.lon1, meta.lat0], [meta.lon0, meta.lat0]] },
       },
       layers: [
         { id: 'base-sat', type: 'raster', source: 'sat' },
         { id: 'base-osm', type: 'raster', source: 'osm', layout: { visibility: 'none' } },
-        // Sits between basemap and overlay: the upper half of the clarity
-        // slider fades the ground away behind the heatmap rather than fading
-        // the heatmap itself, so the colours stay at full strength throughout.
         { id: 'veil', type: 'background',
           paint: { 'background-color': '#ffffff', 'background-opacity': 0 } },
         { id: 'ov', type: 'raster', source: 'ov',
           paint: { 'raster-opacity': 0.85, 'raster-fade-duration': 0 } },
-        // Above the overlay: contours are reference, and have to stay legible
-        // even when the clarity slider has the heatmap at full strength.
-        // Minor lines only once they are far enough apart to read: 10 m
-        // spacing across a 50 km view is an unreadable smear.
         { id: 'contour-minor', type: 'line', source: 'contours',
           filter: ['!', ['get', 'major']], minzoom: 11,
-          paint: {
-            'line-color': '#4a3f35', 'line-opacity': 0.45,
-            'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.5, 14, 1.0, 17, 1.6],
-          } },
+          paint: { 'line-color': '#4a3f35', 'line-opacity': 0.45,
+            'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.5, 14, 1.0, 17, 1.6] } },
         { id: 'contour-major', type: 'line', source: 'contours',
           filter: ['get', 'major'],
-          paint: {
-            'line-color': '#332c25', 'line-opacity': 0.7,
-            'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.7, 12, 1.4, 15, 2.2, 17, 3.0],
-          } },
+          paint: { 'line-color': '#332c25', 'line-opacity': 0.7,
+            'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.7, 12, 1.4, 15, 2.2, 17, 3.0] } },
       ],
     },
-    center: [data.centre[1], data.centre[0]], zoom: 9.4,
+    center: [(meta.lon0 + meta.lon1) / 2, (meta.lat0 + meta.lat1) / 2], zoom: 6.4,
     attributionControl: { compact: false },
   });
   window.map = map;
-  // Replacing the overlay image cancels any still-loading predecessor. That is
-  // the intended behaviour while dragging a control, so acknowledge it rather
-  // than letting it surface as an unhandled error.
-  map.on('error', e => {
-    const err = e && e.error;
-    if (err && (err.name === 'AbortError' || err.code === 20)) return;
-    console.warn('map error', err || e);
-  });
   map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 120 }), 'bottom-left');
-  map.on('load', () => { setClarity(+document.getElementById('clarity').value); refresh(); });
+  map.on('load', () => { setClarity(+document.getElementById('clarity').value); scheduleRender(); });
+  map.on('moveend', scheduleRender);
+
   map.on('mousemove', e => {
-    const f = map.queryRenderedFeatures(e.point,
-      { layers: ['contour-major', 'contour-minor'] });
+    const f = map.queryRenderedFeatures(e.point, { layers: ['contour-major', 'contour-minor'] });
     map.getCanvas().style.cursor = f.length ? 'crosshair' : '';
     const el = document.getElementById('hover');
     if (f.length) { el.hidden = false; el.textContent = `${f[0].properties.e} m`; }
     else el.hidden = true;
   });
-
   map.on('click', e => {
     if (e.originalEvent.target.closest('.spot')) return;
     const { lat, lng } = e.lngLat;
     new maplibregl.Popup().setLngLat(e.lngLat).setHTML(
-      `<b>${elevationAt(lat, lng)}</b><br>` +
-      `${lat.toFixed(5)}, ${lng.toFixed(5)}<br>` +
+      `<b>${elevationAt(lat, lng)}</b><br>${lat.toFixed(5)}, ${lng.toFixed(5)}<br>` +
       `<a target="_blank" rel="noopener noreferrer" href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lng.toFixed(5)}">open in Google Maps</a>`
     ).addTo(map);
   });

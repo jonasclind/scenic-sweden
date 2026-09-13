@@ -117,6 +117,7 @@ def main():
     print(f"{len(tiles)} tiles, {len(done)} already done\n")
 
     t_start = time.time()
+    done_here = 0
     for k, (a0, o0) in enumerate(tiles):
         key = f"{a0:.3f}_{o0:.3f}"
         if key in done:
@@ -164,9 +165,12 @@ def main():
                     ~sg.on_water & np.isfinite(sg.ground)).reshape(rows.size, cols.size)
 
         done.add(key)
+        done_here += 1
         state_path.write_text(json.dumps({"done": sorted(done)}))
         el = time.time() - t_start
-        left = (len(tiles) - len(done)) * el / max(len(done), 1)
+        # rate from tiles finished in THIS run: dividing by the total, which
+        # includes tiles restored from the checkpoint, understates the ETA badly
+        left = (len(tiles) - len(done)) * el / done_here
         print(f"[{len(done):2d}/{len(tiles)}] {key}  {rows.size}x{cols.size} obs  "
               f"prep {t_prep:4.1f}s  total {time.time()-t0:5.1f}s  "
               f"eta {left/60:5.1f} min", flush=True)
