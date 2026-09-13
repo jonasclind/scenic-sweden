@@ -8,7 +8,8 @@ import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=3';
 const CANVAS_MAX = 1100;          // long edge of the overlay bitmap
 const CELL_BUDGET = 700 * 700;    // cells we will score for one frame
 
-const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false, contours: true };
+const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false,
+                contours: true, siteMax: 99 };
 let meta, wheel, range, map, markers = [];
 const cache = new Map();
 const inflight = new Map();
@@ -58,7 +59,7 @@ function tile(L, iy, ix) {
   if (!cache.has(kd)) loadParts(kd, L, iy, ix,
     [[`dist_${combo}`, Uint8Array], [`water_${combo}`, Uint32Array]]);
   if (!cache.has(kb)) loadParts(kb, L, iy, ix,
-    [['valid', Uint8Array], ['elev', Int16Array]]);
+    [['valid', Uint8Array], ['elev', Int16Array], ['canopy', Uint8Array]]);
   const d = cache.get(kd), b = cache.get(kb);
   return (d && b) ? { ...d, ...b } : null;
 }
@@ -94,6 +95,7 @@ function gather(vwin) {
   const water = new Uint32Array(w * h);
   const valid = new Uint8Array(w * h);
   const elev = new Int16Array(w * h);
+  const canopy = new Uint8Array(w * h);
   let missing = 0;
 
   const iy0 = Math.floor(y0 / lv.tile_rows), iy1 = Math.floor(vwin.y1 / lv.tile_rows);
@@ -113,12 +115,13 @@ function gather(vwin) {
           water[di] = t.water[si];
           valid[di] = t.valid[si];
           elev[di] = t.elev[si];
+          canopy[di] = t.canopy[si];
           dist.set(t.dist.subarray(si * A, si * A + A), di * A);
         }
       }
     }
   }
-  return { dist, water, valid, elev, missing };
+  return { dist, water, valid, elev, canopy, missing };
 }
 
 /* ----------------------------------------------------------------- scoring */
@@ -140,6 +143,9 @@ function score(vwin, data) {
 
   for (let c = 0; c < n; c++) {
     if (!data.valid[c]) continue;
+    // Where you can stand, as opposed to what blocks the view. A hilltop buried
+    // in spruce is not a viewpoint however far you could see from above it.
+    if (data.canopy[c] > state.siteMax) continue;
     if (state.waterOnly && !(data.water[c] & mask)) continue;
     let sum = 0; const base = c * A;
     for (let i = 0; i < bins.length; i++) sum += data.dist[base + bins[i]];
@@ -334,7 +340,6 @@ function setClarity(v) {
 function buildUI() {
   document.querySelector('#range .fill').style.background =
     `linear-gradient(90deg, ${meta.ramp.join(',')})`;
-  document.getElementById('canopy').textContent = meta.canopy_m;
 
   wheel = new DirectionWheel(document.getElementById('wheel'), scheduleRender);
   range = new RangeSlider(document.getElementById('range'), {
@@ -378,9 +383,22 @@ function buildUI() {
       } else { state.waterOnly = b.dataset.v === 'water'; scheduleRender(); }
     });
 
-  document.getElementById('bare').addEventListener('change', e => {
-    state.veg = e.target.checked ? 'bare' : 'trees'; scheduleRender();
+  document.getElementById('trees').addEventListener('click', ev => {
+    const b = ev.target.closest('button'); if (!b) return;
+    [...ev.currentTarget.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
+    state.veg = b.dataset.v; scheduleRender();
   });
+
+  const site = document.getElementById('site');
+  const showSite = () => {
+    document.getElementById('sitev').textContent =
+      state.siteMax >= 30 ? 'anywhere' : `under ${state.siteMax} m`;
+  };
+  site.addEventListener('input', () => {
+    state.siteMax = +site.value >= 30 ? 99 : +site.value;
+    showSite(); scheduleRender();
+  });
+  showSite();
   const cont = document.getElementById('contours');
   cont.addEventListener('change', e => {
     state.contours = e.target.checked;

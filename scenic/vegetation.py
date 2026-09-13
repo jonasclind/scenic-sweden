@@ -1,17 +1,23 @@
-"""Vegetation as an obstruction surface.
+"""Vegetation and buildings as an obstruction surface.
 
 TessaDEM is bare earth, so without this every score is a view of a clear-felled
-county - which is why the first ranked list put most spots in forest. ESA
-WorldCover gives a 10 m tree mask for free and without an account; we pair it
-with a nominal canopy height.
+county. The heights come from the Meta/WRI canopy model (CC BY 4.0), reduced to
+a region raster by scripts/build_canopy.py.
 
-A mask plus one height is crude. It is also enough for the question being asked,
-because the thing that ruins a view is the presence of a 20 m wall of spruce,
-not whether it is 19 m or 23 m. Real per-pixel heights (Skogsstyrelsen, CC0, or
-the ETH 10 m global model) are the upgrade path.
+Real per-pixel heights replaced a flat 20 m assumption, and the difference is
+not cosmetic. At a viewpoint Jonas knows, WorldCover called 93% of the
+surrounding 200 m "tree cover" and we therefore modelled 20 m of spruce; the
+actual canopy there averages 7.6 m, 28% of it is open ground, and 46% is under
+5 m. Eight metres of imagined forest is exactly the margin that decides whether
+you see over a slope.
+
+Two statistics, because the canopy answers two questions:
+  max   what stops a view - a ray grazing a forest meets the tallest trees.
+  mean  typical cover at a spot - whether you could stand there in the open.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -19,17 +25,61 @@ import numpy as np
 from .grid import LocalGrid
 
 LANDCOVER_DIR = Path("/Volumes/T7/scenic/landcover")
+CANOPY_DIR = Path("/Volumes/T7/scenic/canopy_region")
 
-# ESA WorldCover v200 classes
 TREE_COVER = 10
 SHRUBLAND = 20
 BUILT_UP = 50
 
-# Nominal heights, metres. Managed spruce and pine in Vastergotland runs 20-25 m
-# at harvest age; 20 m is deliberately a little conservative.
-CANOPY_M = 20.0
 SHRUB_M = 2.0
 BUILDING_M = 6.0
+ROW_BAND = 512            # process the grid in bands; the whole thing in float64 is 600 MB
+
+
+class CanopyRegion:
+    """The reduced canopy raster: Web Mercator, aligned to the source tile grid."""
+
+    def __init__(self, root: Path = CANOPY_DIR):
+        self.meta = json.loads((root / "canopy.json").read_text())
+        shape = (self.meta["rows"], self.meta["cols"])
+        self.max = np.memmap(root / "canopy_max.u8", dtype=np.uint8, mode="r", shape=shape)
+        self.mean = np.memmap(root / "canopy_mean.u8", dtype=np.uint8, mode="r", shape=shape)
+
+    def _index(self, lon, lat):
+        m = self.meta
+        x = lon / 180.0 * m["R"]
+        y = np.log(np.tan(np.pi / 4 + np.radians(lat) / 2)) * m["R"]
+        c = np.rint((x + m["R"]) / m["cell"]).astype(np.int64) - m["col0"]
+        r = np.rint((m["R"] - y) / m["cell"]).astype(np.int64) - m["row0"]
+        ok = (c >= 0) & (c < m["cols"]) & (r >= 0) & (r < m["rows"])
+        return np.clip(r, 0, m["rows"] - 1), np.clip(c, 0, m["cols"] - 1), ok
+
+    def sample(self, lon, lat, which: str = "max") -> np.ndarray:
+        r, c, ok = self._index(lon, lat)
+        src = self.max if which == "max" else self.mean
+        return np.where(ok, src[r, c], 0).astype(np.float32)
+
+
+def _landcover_class(grid: LocalGrid, lat, lon, out, sel_rows):
+    """WorldCover classes for a band of the grid. Used only for built-up now."""
+    import rasterio
+    for p in _tiles_for(np.nanmin(lat), np.nanmax(lat), np.nanmin(lon), np.nanmax(lon)):
+        if not p.exists():
+            continue
+        with rasterio.open(p) as src:
+            b = src.bounds
+            sel = ((lon >= b.left) & (lon < b.right) & (lat >= b.bottom) & (lat < b.top))
+            if not sel.any():
+                continue
+            tr = src.transform
+            cols = ((lon[sel] - tr.c) / tr.a).astype(np.int64)
+            rows = ((lat[sel] - tr.f) / tr.e).astype(np.int64)
+            rows = np.clip(rows, 0, src.height - 1)
+            cols = np.clip(cols, 0, src.width - 1)
+            r0, r1 = int(rows.min()), int(rows.max()) + 1
+            c0, c1 = int(cols.min()), int(cols.max()) + 1
+            block = src.read(1, window=((r0, r1), (c0, c1)))
+            out[sel_rows][sel] = block[rows - r0, cols - c0]
 
 
 def _tiles_for(lat_lo: float, lat_hi: float, lon_lo: float, lon_hi: float):
@@ -41,47 +91,40 @@ def _tiles_for(lat_lo: float, lat_hi: float, lon_lo: float, lon_hi: float):
             yield LANDCOVER_DIR / f"ESA_WorldCover_10m_2021_v200_{ns}{ew}_Map.tif"
 
 
-def obstruction_height(grid: LocalGrid) -> np.ndarray:
-    """Height to add to bare earth at every cell of `grid`, in metres."""
-    import rasterio
-
+def _bands(grid: LocalGrid):
     ny, nx = grid.z.shape
-    ys = np.arange(ny) * grid.step + grid.y0
     xs = np.arange(nx) * grid.step + grid.x0
-    X, Y = np.meshgrid(xs, ys)
-    lon, lat = grid.xy_to_lonlat(X, Y)
+    for y0 in range(0, ny, ROW_BAND):
+        y1 = min(y0 + ROW_BAND, ny)
+        ys = np.arange(y0, y1) * grid.step + grid.y0
+        X, Y = np.meshgrid(xs, ys)
+        lon, lat = grid.xy_to_lonlat(X, Y)
+        yield slice(y0, y1), lon, lat
 
+
+def obstruction_height(grid: LocalGrid, canopy: CanopyRegion | None = None) -> np.ndarray:
+    """Height above bare earth that blocks a view, per cell."""
+    import rasterio  # noqa: F401  (checked early so a missing dep fails here)
+    canopy = canopy or CanopyRegion()
+    out = np.zeros(grid.z.shape, np.float32)
     cls = np.zeros(grid.z.shape, np.uint8)
-    paths = list(_tiles_for(lat.min(), lat.max(), lon.min(), lon.max()))
-    missing = [p for p in paths if not p.exists()]
-    if missing:
-        raise FileNotFoundError(
-            "missing WorldCover tiles:\n  " + "\n  ".join(str(p) for p in missing))
+    for sl, lon, lat in _bands(grid):
+        out[sl] = canopy.sample(lon, lat, "max")
+        _landcover_class(grid, lat, lon, cls, sl)
+    # Buildings are not in a canopy model, and WorldCover still knows where they
+    # are. Take whichever is taller rather than adding them.
+    out = np.maximum(out, np.where(cls == BUILT_UP, BUILDING_M, 0.0))
+    out = np.maximum(out, np.where((cls == SHRUBLAND) & (out < SHRUB_M), SHRUB_M, 0.0))
+    return out
 
-    for p in paths:
-        with rasterio.open(p) as src:
-            b = src.bounds
-            sel = ((lon >= b.left) & (lon < b.right) &
-                   (lat >= b.bottom) & (lat < b.top))
-            if not sel.any():
-                continue
-            # src.index() is scalar-only, so map through the affine directly.
-            # WorldCover is north-up, so the rotation terms are zero.
-            tr = src.transform
-            cols = ((lon[sel] - tr.c) / tr.a).astype(np.int64)
-            rows = ((lat[sel] - tr.f) / tr.e).astype(np.int64)
-            rows = np.clip(rows, 0, src.height - 1)
-            cols = np.clip(cols, 0, src.width - 1)
-            r0, r1 = int(rows.min()), int(rows.max()) + 1
-            c0, c1 = int(cols.min()), int(cols.max()) + 1
-            block = src.read(1, window=((r0, r1), (c0, c1)))
-            cls[sel] = block[rows - r0, cols - c0]
 
-    h = np.zeros(grid.z.shape, np.float32)
-    h[cls == TREE_COVER] = CANOPY_M
-    h[cls == SHRUBLAND] = SHRUB_M
-    h[cls == BUILT_UP] = BUILDING_M
-    return h
+def site_canopy(grid: LocalGrid, canopy: CanopyRegion | None = None) -> np.ndarray:
+    """Typical canopy height at each cell: is this spot itself in forest?"""
+    canopy = canopy or CanopyRegion()
+    out = np.zeros(grid.z.shape, np.float32)
+    for sl, lon, lat in _bands(grid):
+        out[sl] = canopy.sample(lon, lat, "mean")
+    return out
 
 
 def surface(grid: LocalGrid, height: np.ndarray) -> LocalGrid:

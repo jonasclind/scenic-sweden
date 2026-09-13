@@ -22,7 +22,8 @@ import numpy as np
 from scenic import safe
 from scenic.grid import build_local_grid, metres_per_degree
 from scenic.tessadem import Mosaic
-from scenic.vegetation import CANOPY_M, _tiles_for, obstruction_height, surface
+from scenic.vegetation import (CanopyRegion, _tiles_for, obstruction_height,
+                               surface)
 from scenic.viewshed import compute_multi
 from scenic.water import detect_water
 
@@ -64,6 +65,7 @@ def main():
     if args.out:
         OUT = Path(args.out)
 
+    canopy = CanopyRegion()
     lats, lons = region_grid()
     R, C = lats.size, lons.size
     safe.ensure_dir(OUT)
@@ -77,6 +79,9 @@ def main():
 
     elev = mm("elev.i16", (R, C), np.int16)
     valid = mm("valid.u8", (R, C), np.uint8)
+    # typical canopy where the observer stands - the "is this spot itself in
+    # forest" question, which is separate from what blocks the view
+    site = mm("canopy.u8", (R, C), np.uint8)
     dist = {}
     water = {}
     for v in VEG:
@@ -91,7 +96,7 @@ def main():
         lat0=float(lats[0]), lat1=float(lats[-1]),
         lon0=float(lons[0]), lon1=float(lons[-1]),
         rows=int(R), cols=int(C), azimuths=N_AZ, obs_m=OBS_M,
-        max_dist_km=VIEW_KM, canopy_m=CANOPY_M,
+        max_dist_km=VIEW_KM,
         eyes=[dict(cm=cm, m=e) for cm, e in EYES], veg=VEG), indent=2))
 
     state_path = OUT / "progress.json"
@@ -150,7 +155,7 @@ def main():
                            int(np.floor(lon_c + half_km / 60)))
         grid = build_local_grid(mos, lat_c, lon_c, half_km, DEM_M); del mos
         wmask = detect_water(grid.z, DEM_M)
-        surf = surface(grid, obstruction_height(grid))
+        surf = surface(grid, obstruction_height(grid, canopy))
         t_prep = time.time() - t0
 
         LA, LO = np.meshgrid(lats[rows], lons[cols], indexing="ij")
@@ -169,6 +174,9 @@ def main():
                 water[(v, cm)][np.ix_(rows, cols)] = wm.reshape(rows.size, cols.size)
             if v == VEG[0]:
                 sg = sigs[0]
+                site[np.ix_(rows, cols)] = np.clip(
+                    canopy.sample(LO.ravel(), LA.ravel(), "mean"), 0, 255
+                ).astype(np.uint8).reshape(rows.size, cols.size)
                 elev[np.ix_(rows, cols)] = np.rint(
                     np.nan_to_num(sg.ground, nan=-32768)).reshape(rows.size, cols.size)
                 valid[np.ix_(rows, cols)] = (
@@ -188,7 +196,7 @@ def main():
             print("stopping (--only)")
             break
 
-    for m in list(dist.values()) + list(water.values()) + [elev, valid]:
+    for m in list(dist.values()) + list(water.values()) + [elev, valid, site]:
         m.flush()
     print(f"\ndone in {(time.time()-t_start)/60:.1f} min")
 

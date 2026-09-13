@@ -40,6 +40,9 @@
   label.chk{display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-size:12px}
   label.chk input{margin:2px 0 0}
   label.chk em{display:block;font-style:normal;color:var(--ink-3);font-size:11px;line-height:1.4}
+  .hint{color:var(--ink-3);font-size:11px;line-height:1.4;margin-top:6px}
+  .hint em{font-style:italic}
+  #sitev{font-size:11px;color:var(--ink-2);font-weight:500}
   input[type=range]{width:100%;accent-color:var(--accent)}
   .rowlbl{display:flex;justify-content:space-between;align-items:baseline;font-size:10px;
     color:var(--ink-3);font-variant-numeric:tabular-nums}
@@ -100,12 +103,23 @@
   </div>
 
   <div class="grp">
-    <label class="chk">
-      <input type="checkbox" id="bare">
-      <span>Remove forest
-        <em>Views as if clear-felled. Off = today's canopy, <b id="canopy">20</b> m
-            over ESA WorldCover tree cover.</em></span>
-    </label>
+    <div class="lbl">Trees in the view</div>
+    <div class="seg" id="trees">
+      <button data-v="trees" aria-pressed="true">As they are</button>
+      <button data-v="bare" aria-pressed="false">Cleared</button>
+    </div>
+    <div class="hint">What blocks the view. Canopy heights are measured, not assumed
+      (Meta/WRI, ~0.6 m).</div>
+  </div>
+
+  <div class="grp">
+    <div class="rowlbl">
+      <span class="lbl" style="margin:0">Cover where you stand</span>
+      <span id="sitev"></span>
+    </div>
+    <input type="range" id="site" min="0" max="30" step="1" value="30">
+    <div class="hint">A different question: is the spot <em>itself</em> in forest?
+      Slide down to keep only open ground.</div>
   </div>
 
   <div class="grp">
