@@ -384,6 +384,7 @@ function buildUI() {
   const cont = document.getElementById('contours');
   cont.addEventListener('change', e => {
     state.contours = e.target.checked;
+    ensureContours();
     for (const id of ['contour-minor', 'contour-major'])
       if (map.getLayer(id))
         map.setLayoutProperty(id, 'visibility', state.contours ? 'visible' : 'none');
@@ -403,6 +404,26 @@ function renderTicks() {
   }
 }
 
+const CONTOUR_MIN_ZOOM = 9;
+
+/* Contours are 5.6 MB and only legible once you are zoomed in: across the whole
+ * region they render as a grey mesh that hides the terrain they describe. The
+ * source is added the first time the map is close enough to want them, so the
+ * file is never fetched for a viewer who stays zoomed out. */
+function ensureContours() {
+  if (!state.contours || map.getSource('contours')) return;
+  if (map.getZoom() < CONTOUR_MIN_ZOOM) return;
+  map.addSource('contours', { type: 'geojson', data: 'layers/contours_region.geojson' });
+  map.addLayer({ id: 'contour-minor', type: 'line', source: 'contours',
+    filter: ['!', ['get', 'major']], minzoom: 11,
+    paint: { 'line-color': '#4a3f35', 'line-opacity': 0.45,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.5, 14, 1.0, 17, 1.6] } });
+  map.addLayer({ id: 'contour-major', type: 'line', source: 'contours',
+    filter: ['get', 'major'], minzoom: CONTOUR_MIN_ZOOM,
+    paint: { 'line-color': '#332c25', 'line-opacity': 0.7,
+      'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.7, 12, 1.4, 15, 2.2, 17, 3.0] } });
+}
+
 function buildMap() {
   map = new maplibregl.Map({
     container: 'map',
@@ -415,7 +436,6 @@ function buildMap() {
         osm: { type: 'raster', tileSize: 256,
           tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
           attribution: '&copy; OpenStreetMap contributors' },
-        contours: { type: 'geojson', data: 'layers/contours.geojson' },
         ov: { type: 'image', url: BLANK,
           coordinates: [[meta.lon0, meta.lat1], [meta.lon1, meta.lat1],
                         [meta.lon1, meta.lat0], [meta.lon0, meta.lat0]] },
@@ -427,14 +447,6 @@ function buildMap() {
           paint: { 'background-color': '#ffffff', 'background-opacity': 0 } },
         { id: 'ov', type: 'raster', source: 'ov',
           paint: { 'raster-opacity': 0.85, 'raster-fade-duration': 0 } },
-        { id: 'contour-minor', type: 'line', source: 'contours',
-          filter: ['!', ['get', 'major']], minzoom: 11,
-          paint: { 'line-color': '#4a3f35', 'line-opacity': 0.45,
-            'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0.5, 14, 1.0, 17, 1.6] } },
-        { id: 'contour-major', type: 'line', source: 'contours',
-          filter: ['get', 'major'],
-          paint: { 'line-color': '#332c25', 'line-opacity': 0.7,
-            'line-width': ['interpolate', ['linear'], ['zoom'], 9, 0.7, 12, 1.4, 15, 2.2, 17, 3.0] } },
       ],
     },
     center: [(meta.lon0 + meta.lon1) / 2, (meta.lat0 + meta.lat1) / 2], zoom: 6.4,
@@ -444,10 +456,11 @@ function buildMap() {
   map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 120 }), 'bottom-left');
   map.on('load', () => { setClarity(+document.getElementById('clarity').value); scheduleRender(); });
-  map.on('moveend', scheduleRender);
+  map.on('moveend', () => { ensureContours(); scheduleRender(); });
 
   map.on('mousemove', e => {
-    const f = map.queryRenderedFeatures(e.point, { layers: ['contour-major', 'contour-minor'] });
+    const layers = ['contour-major', 'contour-minor'].filter(l => map.getLayer(l));
+    const f = layers.length ? map.queryRenderedFeatures(e.point, { layers }) : [];
     map.getCanvas().style.cursor = f.length ? 'crosshair' : '';
     const el = document.getElementById('hover');
     if (f.length) { el.hidden = false; el.textContent = `${f[0].properties.e} m`; }

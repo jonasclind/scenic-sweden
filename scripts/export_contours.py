@@ -59,16 +59,31 @@ def main():
     ap.add_argument("--smooth", type=float, default=1.0, help="gaussian sigma, in cells")
     ap.add_argument("--tolerance", type=float, default=18.0, help="simplification, metres")
     ap.add_argument("--half-km", type=float, default=25.0)
+    ap.add_argument("--bbox", nargs=4, type=float, metavar=("LAT0","LAT1","LON0","LON1"),
+                    help="cover this box instead of a square around Alingsas")
+    ap.add_argument("--out", default="contours.geojson")
+    ap.add_argument("--no-elev", action="store_true")
     args = ap.parse_args()
 
-    lat0, lon0 = ALINGSAS
+    if args.bbox:
+        b = args.bbox
+        lat0, lon0 = (b[0] + b[1]) / 2, (b[2] + b[3]) / 2
+    else:
+        lat0, lon0 = ALINGSAS
     m_lat, m_lon = metres_per_degree(lat0)
+    half_km_x = None
+    if args.bbox:
+        b = args.bbox
+        args.half_km = (b[1] - b[0]) * m_lat / 2000
+        half_km_x = (b[3] - b[2]) * m_lon / 2000
 
+    _hx = half_km_x if half_km_x is not None else args.half_km
     mos = Mosaic.build(DEM, int(np.floor(lat0 - args.half_km/111)),
                        int(np.floor(lat0 + args.half_km/111)),
-                       int(np.floor(lon0 - args.half_km/60)),
-                       int(np.floor(lon0 + args.half_km/60)))
-    grid = build_local_grid(mos, lat0, lon0, args.half_km, args.step); del mos
+                       int(np.floor(lon0 - _hx/60)),
+                       int(np.floor(lon0 + _hx/60)))
+    grid = build_local_grid(mos, lat0, lon0, args.half_km, args.step,
+                            half_km_x=half_km_x); del mos
 
     # A little smoothing first: at 30 m source resolution the raw isolines are
     # visibly stepped, and the wobble is sampling noise rather than terrain.
@@ -106,18 +121,21 @@ def main():
                              "coordinates": np.stack([lon, lat], 1).tolist()},
             })
 
+    if args.no_elev:
+        pass
     # A coarse elevation grid alongside, so the map can answer "how high is
     # this spot?" on click. 501x501 int16 is half a megabyte.
-    eg = build_local_grid(Mosaic.build(DEM, int(np.floor(lat0 - args.half_km/111)),
+    eg = None if args.no_elev else build_local_grid(Mosaic.build(DEM, int(np.floor(lat0 - args.half_km/111)),
                                        int(np.floor(lat0 + args.half_km/111)),
                                        int(np.floor(lon0 - args.half_km/60)),
                                        int(np.floor(lon0 + args.half_km/60))),
                           lat0, lon0, args.half_km, 100.0)
-    ez = np.rint(np.nan_to_num(eg.z, nan=-32768)).astype(np.int16)
-    (WEB / "layers" / "elev.bin").write_bytes(ez.tobytes())
-    print(f"elev.bin  {ez.shape}  {ez.nbytes/1e6:.2f} MB")
+    if eg is not None:
+        ez = np.rint(np.nan_to_num(eg.z, nan=-32768)).astype(np.int16)
+        (WEB / "layers" / "elev.bin").write_bytes(ez.tobytes())
+        print(f"elev.bin  {ez.shape}  {ez.nbytes/1e6:.2f} MB")
 
-    out = WEB / "layers" / "contours.geojson"
+    out = WEB / "layers" / args.out
     out.write_text(json.dumps({"type": "FeatureCollection", "features": feats},
                               separators=(",", ":")))
     majors = sum(f["properties"]["major"] for f in feats)

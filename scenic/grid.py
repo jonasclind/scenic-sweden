@@ -74,13 +74,21 @@ class LocalGrid:
 
 
 def build_local_grid(mosaic: Mosaic, lat0: float, lon0: float,
-                     half_km: float, step_m: float) -> LocalGrid:
-    """Resample a lat/lon mosaic onto a metric grid centred on (lat0, lon0)."""
+                     half_km: float, step_m: float,
+                     half_km_x: float | None = None) -> LocalGrid:
+    """Resample a lat/lon mosaic onto a metric grid centred on (lat0, lon0).
+
+    Square by default. `half_km_x` gives a separate east-west half-width: a
+    square grid over a tall region reaches far outside the data to the east and
+    west, and demands terrain tiles that were never needed.
+    """
     m_lat, m_lon = metres_per_degree(lat0)
     half = half_km * 1000.0
+    half_x = (half_km_x if half_km_x is not None else half_km) * 1000.0
+    nx = int(round(2 * half_x / step_m)) + 1
     n = int(round(2 * half / step_m)) + 1
-    ax = (np.arange(n, dtype=np.float64) - (n - 1) / 2) * step_m
-    ay = ax.copy()
+    ax = (np.arange(nx, dtype=np.float64) - (nx - 1) / 2) * step_m
+    ay = (np.arange(n, dtype=np.float64) - (n - 1) / 2) * step_m
     X, Y = np.meshgrid(ax, ay)          # row 0 = south
     lon = lon0 + X / m_lon
     lat = lat0 + Y / m_lat

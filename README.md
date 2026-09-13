@@ -28,9 +28,15 @@ Outputs: signatures to `/Volumes/T7/scenic/pilot/*.npz`, heatmaps to `out/*.png`
 
 ## The map
 
-    ./.venv/bin/python scripts/export_web.py       # six signature sets, ~7 min
-    ./.venv/bin/python scripts/export_contours.py  # contours + elevation grid
+    ./.venv/bin/python scripts/build_region.py     # 45 tiles, ~95 min, resumable
+    ./.venv/bin/python scripts/pack_region.py      # web tiles, ~20 s
+    ./.venv/bin/python scripts/export_contours.py --bbox 55.30 59.20 11.10 14.60 \
+        --interval 25 --major-every 4 --step 100 --tolerance 40 --no-elev \
+        --out contours_region.geojson
     ./.venv/bin/python scripts/serve.py 8731
+
+`export_web.py` builds the same layers for a single 50 km box and predates the
+region pipeline; it is still useful for quick experiments on one area.
 
 `serve.py` sends `no-store`. `python -m http.server` sends no cache headers at
 all, so browsers fall back to heuristic freshness and quietly keep running a
@@ -89,6 +95,28 @@ or standing at a first-floor window, which is the right answer and a useful
 check on the model. Height only buys a view once you are in the open, and that
 is why per-pixel canopy heights matter more than any other refinement on the
 list.
+
+## Region
+
+Skåne, Halland, southern Bohuslän and Västra Götaland: lat 55.30-59.20,
+lon 11.10-14.60, **91,425 km²**, 9.18M observers at 100 m spacing. Three eye
+heights times two vegetation states is six signature sets, 2 GB of memory-mapped
+arrays on the T7, packed to 2.14 GB of web tiles.
+
+The box is a rectangle, so its south-west corner takes in eastern Denmark and a
+good deal of sea. That is not waste: seeing across Öresund from Skåne is a real
+view, and the Danish coast is part of it.
+
+    region 4344 x 2113 = 9.18M cells, land 67%
+    elevation on land -6 to 373 m (highest ground in the region is ~360 m)
+
+    set          median reach    sees water
+    trees_0           0.00 km          4.2%
+    trees_170         0.00 km          6.3%
+    trees_500         0.00 km          8.0%
+    bare_0            1.52 km         19.4%
+    bare_170          2.93 km         31.8%
+    bare_500          4.60 km         43.2%
 
 ## Data
 
