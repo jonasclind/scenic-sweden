@@ -109,14 +109,23 @@ view, and the Danish coast is part of it.
 
     region 4344 x 2113 = 9.18M cells, land 67%
     elevation on land -6 to 373 m (highest ground in the region is ~360 m)
+    canopy where you stand: median 2 m, open (<2 m) 49%, forest (>10 m) 24%
 
     set          median reach    sees water
-    trees_0           0.00 km          4.2%
-    trees_170         0.00 km          6.3%
-    trees_500         0.00 km          8.0%
+    trees_0           0.05 km          6.0%
+    trees_170         0.15 km         10.1%
+    trees_500         0.48 km         15.5%
     bare_0            1.52 km         19.4%
     bare_170          2.93 km         31.8%
     bare_500          4.60 km         43.2%
+
+Region-wide medians are dominated by forest interiors, which genuinely see
+nothing. Split by cover at the observer, with today's canopy:
+
+    cover at spot     ground   standing   2nd floor   reach 2 km (2nd floor)
+    open   <2 m      0.41 km    0.81 km     1.49 km                    41%
+    light 2-6 m      0.02 km    0.10 km     0.46 km                    15%
+    forest >10 m     0.00 km    0.00 km     0.00 km                     1%
 
 ## Data
 
