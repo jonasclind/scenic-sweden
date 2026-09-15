@@ -11,12 +11,12 @@
   html,body{margin:0;height:100%;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink)}
   #map{position:absolute;inset:0}
   #ovcanvas{display:none}
-  .panel{position:absolute;top:12px;left:12px;z-index:2;width:252px;background:var(--surface);
+  .panel{position:absolute;top:12px;left:12px;z-index:2;width:236px;background:var(--surface);
     border:1px solid var(--line);border-radius:8px;box-shadow:0 2px 14px rgba(0,0,0,.15);
     overflow:hidden;max-height:calc(100% - 24px);overflow-y:auto}
   .panel h1{margin:0;padding:11px 13px 9px;font-size:13px;font-weight:600;border-bottom:1px solid var(--line)}
   .panel h1 span{display:block;font-weight:400;font-size:11px;color:var(--ink-3);margin-top:2px}
-  .grp{padding:11px 13px;border-bottom:1px solid var(--line)}
+  .grp{padding:9px 12px;border-bottom:1px solid var(--line)}
   .grp:last-child{border-bottom:0}
   .lbl{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-3);margin-bottom:6px}
   .seg{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
@@ -32,7 +32,7 @@
   #busy{position:absolute;top:12px;left:276px;z-index:3;background:var(--surface);
     border:1px solid var(--line);border-radius:6px;padding:5px 10px;font-size:11px;
     color:var(--ink-2);box-shadow:0 2px 8px rgba(0,0,0,.12)}
-  #wheel{display:block;width:140px;height:140px;margin:2px auto 6px;touch-action:none;user-select:none}
+  #wheel{display:block;width:118px;height:118px;margin:0 auto 6px;touch-action:none;user-select:none}
   #presets{display:flex;flex-wrap:wrap;gap:4px}
   #presets button{flex:1 0 28%;padding:4px 2px;font:inherit;font-size:11px;background:#fff;
     border:1px solid var(--line);border-radius:5px;color:var(--ink-2);cursor:pointer}
@@ -40,8 +40,9 @@
   label.chk{display:flex;gap:8px;align-items:flex-start;cursor:pointer;font-size:12px}
   label.chk input{margin:2px 0 0}
   label.chk em{display:block;font-style:normal;color:var(--ink-3);font-size:11px;line-height:1.4}
-  .hint{color:var(--ink-3);font-size:11px;line-height:1.4;margin-top:6px}
-  .hint em{font-style:italic}
+  .checks label{display:flex;gap:7px;align-items:center;cursor:pointer;font-size:12px;
+    padding:2px 0}
+  .checks input{margin:0}
   #sitev{font-size:11px;color:var(--ink-2);font-weight:500}
   input[type=range]{width:100%;accent-color:var(--accent)}
   .rowlbl{display:flex;justify-content:space-between;align-items:baseline;font-size:10px;
@@ -73,10 +74,7 @@
 <canvas id="ovcanvas"></canvas>
 
 <div class="panel">
-  <h1>Scenic View Finder<span>Skåne · Halland · Bohuslän · Västra Götaland<br>91,000 km² · views to 20 km</span></h1>
-
   <div class="grp">
-    <div class="lbl">Which directions count</div>
     <svg id="wheel"></svg>
     <div id="presets">
       <button data-v="all">All</button>
@@ -89,37 +87,16 @@
     <div class="stat" id="stat"></div>
   </div>
 
-  <div class="grp">
-    <div class="lbl">Show</div>
-    <div class="seg" id="view">
-      <button data-v="openness" aria-pressed="true">How far you see</button>
-      <button data-v="water" aria-pressed="false">Sees water</button>
-    </div>
+  <div class="grp checks">
+    <label><input type="checkbox" id="water"> View must include lake or sea</label>
+    <label><input type="checkbox" id="bare"> Remove trees</label>
+    <label><input type="checkbox" id="openonly"> Skip spots in forest</label>
+    <label><input type="checkbox" id="contours" checked> Elevation contours</label>
   </div>
 
   <div class="grp">
     <div class="lbl">Eye height</div>
     <div class="seg eyeseg" id="eye"></div>
-  </div>
-
-  <div class="grp">
-    <div class="lbl">Trees in the view</div>
-    <div class="seg" id="trees">
-      <button data-v="trees" aria-pressed="true">As they are</button>
-      <button data-v="bare" aria-pressed="false">Cleared</button>
-    </div>
-    <div class="hint">What blocks the view. Canopy heights are measured, not assumed
-      (Meta/WRI, ~0.6 m).</div>
-  </div>
-
-  <div class="grp">
-    <div class="rowlbl">
-      <span class="lbl" style="margin:0">Cover where you stand</span>
-      <span id="sitev"></span>
-    </div>
-    <input type="range" id="site" min="0" max="30" step="1" value="30">
-    <div class="hint">A different question: is the spot <em>itself</em> in forest?
-      Slide down to keep only open ground.</div>
   </div>
 
   <div class="grp">
@@ -136,31 +113,17 @@
   </div>
 
   <div class="grp">
-    <label class="chk">
-      <input type="checkbox" id="contours" checked>
-      <span>Elevation contours
-        <em>25 m lines, every 100 m heavier, from zoom 9. Traced from the same
-            terrain the scores use, so they agree with the heatmap.</em></span>
-    </label>
-  </div>
-
-  <div class="grp">
-    <div class="lbl">Basemap</div>
     <div class="seg" id="base">
       <button data-v="sat" aria-pressed="true">Satellite</button>
       <button data-v="osm" aria-pressed="false">Map</button>
     </div>
-    <div class="rowlbl" style="margin-top:11px">
+    <div class="rowlbl" style="margin-top:10px">
       <span class="lbl" style="margin:0">Clarity</span>
       <span id="clarityv"></span>
     </div>
     <input type="range" id="clarity" min="0" max="100" step="1" value="50">
-    <div class="ticks" style="height:12px">
-      <span style="left:0;transform:none">map</span>
-      <span style="left:50%">both</span>
-      <span style="left:100%;transform:translateX(-100%)">heatmap</span>
-    </div>
   </div>
+</div>
 
 <script type="module">
   // Dynamic import with a cache-buster. A browser's module map is separate

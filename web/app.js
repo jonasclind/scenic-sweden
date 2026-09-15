@@ -7,6 +7,7 @@ import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=3';
 
 const CANVAS_MAX = 1100;          // long edge of the overlay bitmap
 const CELL_BUDGET = 700 * 700;    // cells we will score for one frame
+const OPEN_GROUND_M = 2;          // canopy below this counts as open ground
 
 const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false,
                 contours: true, siteMax: 99 };
@@ -219,7 +220,7 @@ function draw(vwin, sc, top) {
       px[p]     = ramp[kk][0] + (ramp[kk + 1][0] - ramp[kk][0]) * g;
       px[p + 1] = ramp[kk][1] + (ramp[kk + 1][1] - ramp[kk][1]) * g;
       px[p + 2] = ramp[kk][2] + (ramp[kk + 1][2] - ramp[kk][2]) * g;
-      px[p + 3] = (0.25 + 0.60 * t) * 255;
+      px[p + 3] = (0.22 + 0.72 * t) * 255;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -330,9 +331,9 @@ function setClarity(v) {
 
 (async function () {
   meta = await fetch('region/meta.json').then(r => r.json());
-  ramp = ['#FEF0D9', '#FDD9A0', '#F9B85C', '#EE9024', '#CF6B0B', '#9C4A07']
+  ramp = ['#FFF3E0', '#FBD89B', '#F5B35A', '#E8891C', '#C4620A', '#853B06', '#431C02']
     .map(h => [1, 3, 5].map(i => parseInt(h.substr(i, 2), 16)));
-  meta.ramp = ['#FEF0D9', '#FDD9A0', '#F9B85C', '#EE9024', '#CF6B0B', '#9C4A07'];
+  meta.ramp = ['#FFF3E0', '#FBD89B', '#F5B35A', '#E8891C', '#C4620A', '#853B06', '#431C02'];
   buildUI();
   buildMap();
 })();
@@ -372,33 +373,28 @@ function buildUI() {
     state.eye = +b.dataset.v; scheduleRender();
   });
 
-  for (const grp of ['base', 'view'])
-    document.getElementById(grp).addEventListener('click', ev => {
-      const b = ev.target.closest('button'); if (!b) return;
-      [...ev.currentTarget.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
-      if (grp === 'base') {
-        state.base = b.dataset.v;
-        map.setLayoutProperty('base-sat', 'visibility', state.base === 'sat' ? 'visible' : 'none');
-        map.setLayoutProperty('base-osm', 'visibility', state.base === 'osm' ? 'visible' : 'none');
-      } else { state.waterOnly = b.dataset.v === 'water'; scheduleRender(); }
-    });
-
-  document.getElementById('trees').addEventListener('click', ev => {
+  document.getElementById('base').addEventListener('click', ev => {
     const b = ev.target.closest('button'); if (!b) return;
     [...ev.currentTarget.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
-    state.veg = b.dataset.v; scheduleRender();
+    state.base = b.dataset.v;
+    map.setLayoutProperty('base-sat', 'visibility', state.base === 'sat' ? 'visible' : 'none');
+    map.setLayoutProperty('base-osm', 'visibility', state.base === 'osm' ? 'visible' : 'none');
   });
 
-  const site = document.getElementById('site');
-  const showSite = () => {
-    document.getElementById('sitev').textContent =
-      state.siteMax >= 30 ? 'anywhere' : `under ${state.siteMax} m`;
-  };
-  site.addEventListener('input', () => {
-    state.siteMax = +site.value >= 30 ? 99 : +site.value;
-    showSite(); scheduleRender();
+  document.getElementById('water').addEventListener('change', e => {
+    state.waterOnly = e.target.checked; scheduleRender();
   });
-  showSite();
+
+  document.getElementById('bare').addEventListener('change', e => {
+    state.veg = e.target.checked ? 'bare' : 'trees'; scheduleRender();
+  });
+
+  // "Skip spots in forest" is the site filter as a plain switch: 2 m of cover
+  // is the line between standing in the open and standing under trees.
+  document.getElementById('openonly').addEventListener('change', e => {
+    state.siteMax = e.target.checked ? OPEN_GROUND_M : 99;
+    scheduleRender();
+  });
   const cont = document.getElementById('contours');
   cont.addEventListener('change', e => {
     state.contours = e.target.checked;
