@@ -1,4 +1,4 @@
-import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=5';
+import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=6';
 
 /* The region is 91,000 km2 and one signature set is 294 MB, so nothing here
  * loads the whole thing. Two levels of tiles are fetched for whatever is on

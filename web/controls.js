@@ -69,15 +69,12 @@ export class DirectionWheel {
 
     // One mark per azimuth bin boundary, so it is visible that the view is
     // only ever computed in `bins` directions and the handles land between
-    // them. Every fourth is longer, to give the eye something to count by.
+    // them.
     for (let i = 0; i < this.bins; i++) {
       const d = i * this.step + this.step / 2;
-      const major = i % 4 === 0;
-      const [x1, y1] = this._p(d, this.R - (major ? 8 : 5));
-      const [x2, y2] = this._p(d, this.R);
+      const [x1, y1] = this._p(d, this.R - 5), [x2, y2] = this._p(d, this.R);
       this.svg.appendChild(el('line', {x1, y1, x2, y2,
-        stroke: major ? '#b3a793' : '#cdc5b7',
-        'stroke-width': major ? 1.4 : 1}));
+        stroke: '#cdc5b7', 'stroke-width': 1}));
     }
     for (const [lbl, deg] of [['N', 0], ['E', 90], ['S', 180], ['W', 270]]) {
       const [x1, y1] = this._p(deg, this.R - 5), [x2, y2] = this._p(deg, this.R);
