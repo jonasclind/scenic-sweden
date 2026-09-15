@@ -6,15 +6,22 @@ which looks exactly like a bug in the code you just changed.
 """
 import functools
 import http.server
+import os
 import socketserver
 import sys
 from pathlib import Path
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8731
+# PORT from the environment first, so a launcher can assign one; then an
+# explicit argument; then a default for running it by hand.
+PORT = int(os.environ.get("PORT") or (sys.argv[1] if len(sys.argv) > 1 else 8731))
 ROOT = Path(__file__).resolve().parents[1] / "web"
 
 
-REGION = Path("/Volumes/T7/scenic/region_web")
+# The preview launcher runs sandboxed and cannot read external volumes, so a
+# region served straight off the T7 works by hand and 404s under the launcher.
+# Prefer a local copy (scripts/sync_region.sh) and fall back to the drive.
+LOCAL_REGION = ROOT / "region"
+REGION = LOCAL_REGION if LOCAL_REGION.is_dir() else Path("/Volumes/T7/scenic/region_web")
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -41,4 +48,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 socketserver.TCPServer.allow_reuse_address = True
 with socketserver.TCPServer(("", PORT), functools.partial(Handler, directory=str(ROOT))) as httpd:
     print(f"serving {ROOT} on http://localhost:{PORT} (no-store)")
+    print(f"  region from {REGION}"
+          f"{'' if REGION is LOCAL_REGION else '  [external drive - invisible to the sandboxed launcher]'}")
     httpd.serve_forever()

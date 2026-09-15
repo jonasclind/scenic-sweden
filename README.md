@@ -33,7 +33,15 @@ Outputs: signatures to `/Volumes/T7/scenic/pilot/*.npz`, heatmaps to `out/*.png`
     ./.venv/bin/python scripts/export_contours.py --bbox 55.30 59.20 11.10 14.60 \
         --interval 25 --major-every 4 --step 100 --tolerance 40 --no-elev \
         --out contours_region.geojson
-    ./.venv/bin/python scripts/serve.py 8731
+    ./scripts/sync_region.sh                       # 2 GB into web/, once per repack
+    ./.venv/bin/python scripts/serve.py            # or the scenic-web launch config
+
+`sync_region.sh` copies the packed region from the T7 into `web/`. The preview
+launcher runs its server sandboxed and cannot read external volumes, so serving
+the region straight off the drive works from a hand-started server and returns
+404 under the launcher - the same code, two different answers. A local copy also
+means the site does not care which drive is plugged in. `serve.py` prefers
+`web/region` and falls back to the T7.
 
 `export_web.py` builds the same layers for a single 50 km box and predates the
 region pipeline; it is still useful for quick experiments on one area.

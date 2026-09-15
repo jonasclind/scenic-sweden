@@ -1,7 +1,12 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "scenic-web", "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8731", "--directory", "web"], "port": 8731 }
+    {
+      "name": "scenic-web",
+      "runtimeExecutable": "./.venv/bin/python",
+      "runtimeArgs": ["scripts/serve.py"],
+      "port": 8731,
+      "autoPort": true
+    }
   ]
 }
