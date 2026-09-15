@@ -159,14 +159,6 @@ export class DirectionWheel {
   }
 }
 
-/** Compass bearing of the sun at sunset. Mirrors scenic/score.py. */
-export function sunsetAzimuth(latDeg, dayOfYear) {
-  const decl = -23.44 * Math.PI / 180 * Math.cos(2 * Math.PI * (dayOfYear + 10) / 365.25);
-  const cosAz = Math.sin(decl) / Math.cos(latDeg * Math.PI / 180);
-  return 360 - Math.acos(Math.max(-1, Math.min(1, cosAz))) * 180 / Math.PI;
-}
-
-
 /* Dual-handle range over the distance scale. It replaces a separate "minimum
  * view" control: the legend and the filter become the same thing, so the
  * colours always span exactly the band being asked for.

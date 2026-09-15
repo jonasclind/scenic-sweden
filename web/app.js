@@ -1,4 +1,4 @@
-import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=6';
+import { DirectionWheel, RangeSlider } from './controls.js?v=7';
 
 /* The region is 91,000 km2 and one signature set is 294 MB, so nothing here
  * loads the whole thing. Two levels of tiles are fetched for whatever is on
@@ -353,11 +353,7 @@ function buildUI() {
     const b = ev.target.closest('button'); if (!b) return;
     const v = b.dataset.v;
     if (v === 'all') wheel.set(0, 359.9, false);   // full circle, not a snapped arc
-    else if (v === 'sunset') {
-      const doy = Math.floor((Date.now() - Date.UTC(new Date().getFullYear(), 0, 0)) / 864e5);
-      const az = sunsetAzimuth((meta.lat0 + meta.lat1) / 2, doy);
-      wheel.set(az - 25, az + 25);
-    } else { const a = +v; wheel.set(a - 45, a + 45); }
+    else { const a = +v; wheel.set(a - 45, a + 45); }
   });
 
   const eyes = document.getElementById('eye');
