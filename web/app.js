@@ -1,4 +1,4 @@
-import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=3';
+import { DirectionWheel, RangeSlider, sunsetAzimuth } from './controls.js?v=5';
 
 /* The region is 91,000 km2 and one signature set is 294 MB, so nothing here
  * loads the whole thing. Two levels of tiles are fetched for whatever is on
@@ -342,7 +342,8 @@ function buildUI() {
   document.querySelector('#range .fill').style.background =
     `linear-gradient(90deg, ${meta.ramp.join(',')})`;
 
-  wheel = new DirectionWheel(document.getElementById('wheel'), scheduleRender);
+  wheel = new DirectionWheel(document.getElementById('wheel'), scheduleRender,
+                           meta.azimuths);
   range = new RangeSlider(document.getElementById('range'), {
     max: meta.max_dist_km, lo: 0, hi: meta.max_dist_km, onChange: scheduleRender });
   window.range = range; window.wheel = wheel;
@@ -351,7 +352,7 @@ function buildUI() {
   document.getElementById('presets').addEventListener('click', ev => {
     const b = ev.target.closest('button'); if (!b) return;
     const v = b.dataset.v;
-    if (v === 'all') wheel.set(0, 359.9);
+    if (v === 'all') wheel.set(0, 359.9, false);   // full circle, not a snapped arc
     else if (v === 'sunset') {
       const doy = Math.floor((Date.now() - Date.UTC(new Date().getFullYear(), 0, 0)) / 864e5);
       const az = sunsetAzimuth((meta.lat0 + meta.lat1) / 2, doy);

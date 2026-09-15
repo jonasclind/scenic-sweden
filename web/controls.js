@@ -5,15 +5,25 @@
  * the arc always runs clockwise from `start` to `end`, so a wedge that spans
  * north (say 340 -> 20) is expressed directly rather than as two ranges. */
 export class DirectionWheel {
-  constructor(svg, onChange) {
+  constructor(svg, onChange, bins = 32) {
     this.svg = svg;
     this.onChange = onChange;
+    this.bins = bins;
+    this.step = 360 / bins;
     this.start = 0;
     this.end = 359.9;
     this.R = 54; this.cx = 70; this.cy = 70;
     this._build();
     this._bind();
     this.render();
+  }
+
+  /* Handles land on bin boundaries, so the arc always covers whole azimuth
+   * bins. Anything finer would imply a precision the signature does not have:
+   * the view is only ever computed in 32 directions. */
+  snap(deg) {
+    const half = this.step / 2;
+    return (((Math.round((deg - half) / this.step) * this.step + half) % 360) + 360) % 360;
   }
 
   span() { return (this.end - this.start + 360) % 360 || 360; }
@@ -23,9 +33,15 @@ export class DirectionWheel {
     return ((deg - this.start + 360) % 360) <= this.span();
   }
 
-  set(start, end) {
-    this.start = ((start % 360) + 360) % 360;
-    this.end = ((end % 360) + 360) % 360;
+  set(start, end, snap = true) {
+    if (!snap) {
+      this.start = ((start % 360) + 360) % 360;
+      this.end = ((end % 360) + 360) % 360;
+    } else {
+      this.start = this.snap(start);
+      this.end = this.snap(end);
+      if (this.start === this.end) this.end = this.snap(this.start + this.step);
+    }
     this.render();
     this.onChange();
   }
@@ -51,6 +67,18 @@ export class DirectionWheel {
       style: 'cursor:grab'});
     this.svg.appendChild(this.wedge);
 
+    // One mark per azimuth bin boundary, so it is visible that the view is
+    // only ever computed in `bins` directions and the handles land between
+    // them. Every fourth is longer, to give the eye something to count by.
+    for (let i = 0; i < this.bins; i++) {
+      const d = i * this.step + this.step / 2;
+      const major = i % 4 === 0;
+      const [x1, y1] = this._p(d, this.R - (major ? 8 : 5));
+      const [x2, y2] = this._p(d, this.R);
+      this.svg.appendChild(el('line', {x1, y1, x2, y2,
+        stroke: major ? '#b3a793' : '#cdc5b7',
+        'stroke-width': major ? 1.4 : 1}));
+    }
     for (const [lbl, deg] of [['N', 0], ['E', 90], ['S', 180], ['W', 270]]) {
       const [x1, y1] = this._p(deg, this.R - 5), [x2, y2] = this._p(deg, this.R);
       this.svg.appendChild(el('line', {x1, y1, x2, y2, stroke: '#c9c2b7', 'stroke-width': 1}));
@@ -109,15 +137,17 @@ export class DirectionWheel {
       if (drag === null) return;
       const a = this._angleAt(ev);
       if (drag === 'arc') {
-        let d = a - grabbed;
-        grabbed = a;
+        const d = this.snap(this.start + (a - grabbed)) - this.start;
+        if (!d) return;
+        grabbed += d;
         this.start = (this.start + d + 360) % 360;
         this.end = (this.end + d + 360) % 360;
       } else if (drag === 0) {
-        this.start = a;
+        this.start = this.snap(a);
       } else {
-        this.end = a;
+        this.end = this.snap(a);
       }
+      if (this.start === this.end) return;      // never collapse to nothing
       this.render();
       this.onChange();
     };
