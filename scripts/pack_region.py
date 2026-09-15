@@ -48,6 +48,7 @@ def main():
     elev = open_src("elev.i16", (R, C), np.int16)
     valid = open_src("valid.u8", (R, C), np.uint8)
     site = open_src("canopy.u8", (R, C), np.uint8)
+    drop = open_src("drop.u8", (R, C, A), np.uint8)
 
     levels = []
 
@@ -66,6 +67,12 @@ def main():
     # a clearing inside a 400 m cell is somewhere you can actually stand
     s0 = site[:r0*f, :c0*f].reshape(r0, f, c0, f).min(axis=(1, 3)).astype(np.uint8)
     (d0 / "canopy.bin").write_bytes(s0.tobytes())
+    dr0 = np.empty((r0, c0, A), np.uint8)
+    for y in range(0, r0 * f, 256 * f):
+        ye = min(y + 256 * f, r0 * f)
+        dr0[y // f: ye // f] = np.rint(
+            block_mean(drop[y:ye].astype(np.float32), f)).astype(np.uint8)
+    (d0 / "drop.bin").write_bytes(dr0.tobytes())
     for v, cm in combos:
         dist = open_src(f"dist_{v}_{cm}.u8", (R, C, A), np.uint8)
         water = open_src(f"water_{v}_{cm}.u32", (R, C), np.uint32)
@@ -125,7 +132,9 @@ def main():
                         np.ascontiguousarray(elev[y0:y1, x0:x1]).tobytes())
                     (d / "canopy.bin").write_bytes(
                         np.ascontiguousarray(site[y0:y1, x0:x1]).tobytes())
-                    written += 3
+                    (d / "drop.bin").write_bytes(
+                        np.ascontiguousarray(drop[y0:y1, x0:x1]).tobytes())
+                    written += 4
         print(f"  {v}_{cm} packed")
     levels.append(dict(id=1, step_m=meta["obs_m"], rows=R, cols=C,
                        tile_rows=T, tile_cols=T, tiles_y=ty, tiles_x=tx,
@@ -136,7 +145,7 @@ def main():
         lat0=meta["lat0"], lat1=meta["lat1"], lon0=meta["lon0"], lon1=meta["lon1"],
         azimuths=A, max_dist_km=meta["max_dist_km"],
         eyes=meta["eyes"], veg=meta["veg"], levels=levels,
-        detail_min_zoom=10.5), indent=2))
+        drop_scale=4.0, detail_min_zoom=10.5), indent=2))
     size = sum(p.stat().st_size for p in DST.rglob("*.bin"))
     print(f"\n{written:,} files, {size/1e9:.2f} GB in {DST}")
 

@@ -8,9 +8,10 @@ import { DirectionWheel, RangeSlider } from './controls.js?v=7';
 const CANVAS_MAX = 1100;          // long edge of the overlay bitmap
 const CELL_BUDGET = 700 * 700;    // cells we will score for one frame
 const OPEN_GROUND_M = 2;          // canopy below this counts as open ground
+const DROP_SCALE = 4;             // sustained descent stored in quarter-degrees
 
 const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false,
-                contours: true, siteMax: 99 };
+                contours: true, siteMax: 99, minDrop: 0 };
 let meta, wheel, range, map, markers = [];
 const cache = new Map();
 const inflight = new Map();
@@ -60,7 +61,8 @@ function tile(L, iy, ix) {
   if (!cache.has(kd)) loadParts(kd, L, iy, ix,
     [[`dist_${combo}`, Uint8Array], [`water_${combo}`, Uint32Array]]);
   if (!cache.has(kb)) loadParts(kb, L, iy, ix,
-    [['valid', Uint8Array], ['elev', Int16Array], ['canopy', Uint8Array]]);
+    [['valid', Uint8Array], ['elev', Int16Array], ['canopy', Uint8Array],
+     ['drop', Uint8Array]]);
   const d = cache.get(kd), b = cache.get(kb);
   return (d && b) ? { ...d, ...b } : null;
 }
@@ -97,6 +99,7 @@ function gather(vwin) {
   const valid = new Uint8Array(w * h);
   const elev = new Int16Array(w * h);
   const canopy = new Uint8Array(w * h);
+  const drop = new Uint8Array(w * h * A);
   let missing = 0;
 
   const iy0 = Math.floor(y0 / lv.tile_rows), iy1 = Math.floor(vwin.y1 / lv.tile_rows);
@@ -117,12 +120,13 @@ function gather(vwin) {
           valid[di] = t.valid[si];
           elev[di] = t.elev[si];
           canopy[di] = t.canopy[si];
+          drop.set(t.drop.subarray(si * A, si * A + A), di * A);
           dist.set(t.dist.subarray(si * A, si * A + A), di * A);
         }
       }
     }
   }
-  return { dist, water, valid, elev, canopy, missing };
+  return { dist, water, valid, elev, canopy, drop, missing };
 }
 
 /* ----------------------------------------------------------------- scoring */
@@ -139,40 +143,60 @@ function score(vwin, data) {
   const { w, h, lv } = vwin, A = meta.azimuths, n = w * h;
   const { bins, mask } = selection();
   const k = meta.max_dist_km * 1000 / 255;
-  const loM = range.lo * 1000, hiM = range.capped() ? Infinity : range.hi * 1000;
-  const raw = new Float32Array(n);
 
+  // 1. How far you see, for every cell that is land. No filtering yet.
+  const raw = new Float32Array(n);
   for (let c = 0; c < n; c++) {
     if (!data.valid[c]) continue;
-    // Where you can stand, as opposed to what blocks the view. A hilltop buried
-    // in spruce is not a viewpoint however far you could see from above it.
-    if (data.canopy[c] > state.siteMax) continue;
-    if (state.waterOnly && !(data.water[c] & mask)) continue;
     let sum = 0; const base = c * A;
     for (let i = 0; i < bins.length; i++) sum += data.dist[base + bins[i]];
-    const v = sum / bins.length * k;
-    raw[c] = (v >= loM && v <= hiM) ? v : 0;
+    raw[c] = sum / bins.length * k;
   }
 
-  // Hold-up-across-a-plot filter, radius in metres. At coarse levels one cell
-  // is already wider than the radius, so filtering there would smooth over
-  // kilometres - skip it rather than pretend.
+  // 2. Does the score hold up across a plot? Radius in metres; at coarse levels
+  // one cell is already wider than the radius, so skip rather than smooth over
+  // kilometres and claim a precision the data has not got.
   const r = Math.round(50 / lv.step_m);
-  if (r < 1) return raw;
-  const out = new Float32Array(n), win = new Float32Array((2 * r + 1) ** 2);
-  for (let y = r; y < h - r; y++) {
-    for (let x = r; x < w - r; x++) {
-      let m = 0;
-      for (let dy = -r; dy <= r; dy++)
-        for (let dx = -r; dx <= r; dx++) win[m++] = raw[(y + dy) * w + x + dx];
-      const q = Math.floor(m * 0.25);
-      for (let i = 0; i <= q; i++) {
-        let mi = i;
-        for (let j = i + 1; j < m; j++) if (win[j] < win[mi]) mi = j;
-        const t = win[i]; win[i] = win[mi]; win[mi] = t;
+  let held = raw;
+  if (r >= 1) {
+    held = new Float32Array(n);
+    const win = new Float32Array((2 * r + 1) ** 2);
+    for (let y = r; y < h - r; y++) {
+      for (let x = r; x < w - r; x++) {
+        let m = 0;
+        for (let dy = -r; dy <= r; dy++)
+          for (let dx = -r; dx <= r; dx++) win[m++] = raw[(y + dy) * w + x + dx];
+        const q = Math.floor(m * 0.25);
+        for (let i = 0; i <= q; i++) {
+          let mi = i;
+          for (let j = i + 1; j < m; j++) if (win[j] < win[mi]) mi = j;
+          const t = win[i]; win[i] = win[mi]; win[mi] = t;
+        }
+        held[y * w + x] = win[q];
       }
-      out[y * w + x] = win[q];
     }
+  }
+
+  // 3. Now the filters, as a mask over the finished score. Applying them before
+  // the step above let a filtered-out neighbour drag a qualifying cell to zero,
+  // which punished a spot for its surroundings failing a test it passed.
+  const loM = range.lo * 1000;
+  const hiM = range.capped() ? Infinity : range.hi * 1000;
+  const out = new Float32Array(n);
+  for (let c = 0; c < n; c++) {
+    const v = held[c];
+    if (!(v > 0)) continue;
+    if (v < loM || v > hiM) continue;
+    if (data.canopy[c] > state.siteMax) continue;
+    if (state.waterOnly && !(data.water[c] & mask)) continue;
+    if (state.minDrop > 0) {
+      // Mean sustained descent across the chosen directions, not the best one:
+      // a single steep gully should not qualify an otherwise flat field.
+      let ds = 0; const db = c * A;
+      for (let i = 0; i < bins.length; i++) ds += data.drop[db + bins[i]];
+      if (ds / bins.length / DROP_SCALE < state.minDrop) continue;
+    }
+    out[c] = v;
   }
   return out;
 }
@@ -392,6 +416,21 @@ function buildUI() {
     state.siteMax = e.target.checked ? OPEN_GROUND_M : 99;
     scheduleRender();
   });
+
+  const slope = document.getElementById('slope');
+  const showSlope = () => {
+    // Degrees are abstract at this scale - almost everything useful sits under
+    // one degree - so show the equivalent drop per kilometre alongside.
+    const el = document.getElementById('slopev');
+    if (state.minDrop <= 0) { el.textContent = 'any'; return; }
+    const mPerKm = Math.tan(state.minDrop * Math.PI / 180) * 1000;
+    el.textContent = `≥ ${state.minDrop.toFixed(2)}° · ${mPerKm.toFixed(0)} m/km`;
+  };
+  slope.addEventListener('input', () => {
+    state.minDrop = +slope.value / 100;
+    showSlope(); scheduleRender();
+  });
+  showSlope();
   const cont = document.getElementById('contours');
   cont.addEventListener('change', e => {
     state.contours = e.target.checked;

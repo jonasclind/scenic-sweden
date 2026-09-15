@@ -29,6 +29,7 @@ Outputs: signatures to `/Volumes/T7/scenic/pilot/*.npz`, heatmaps to `out/*.png`
 ## The map
 
     ./.venv/bin/python scripts/build_region.py     # 45 tiles, ~95 min, resumable
+    ./.venv/bin/python scripts/build_relief.py     # sustained descent, ~2 min
     ./.venv/bin/python scripts/pack_region.py      # web tiles, ~20 s
     ./.venv/bin/python scripts/export_contours.py --bbox 55.30 59.20 11.10 14.60 \
         --interval 25 --major-every 4 --step 100 --tolerance 40 --no-elev \
@@ -103,6 +104,29 @@ or standing at a first-floor window, which is the right answer and a useful
 check on the model. Height only buys a view once you are in the open, and that
 is why per-pixel canopy heights matter more than any other refinement on the
 list.
+
+## Elevated spots
+
+Being high is not the same as standing on something steep. A 5 m cliff is
+near-vertical at the spot and gone a hundred metres out; a long hillside is what
+gives a commanding view. So descent is measured at 250 m, 500 m, 1 km and 2 km
+and the *worst* angle wins - a slope only counts if it is still falling at every
+scale.
+
+                        250 m   500 m    1 km    2 km     min
+    5 m cliff, flat      1.15    0.57    0.29    0.14    0.14
+    50 m step, flat     11.31    5.71    2.86    1.43    1.43
+    long 6% slope        3.43    3.43    3.43    2.86    2.86
+
+The filter uses the mean across the chosen directions rather than the best one,
+so a single steep gully cannot qualify an otherwise flat field. Averaged over
+all 32 directions the numbers are small - p90 is 0.25 degrees, p99 is 0.82 - so
+the slider tops out at 1.20 and shows metres per kilometre alongside.
+
+    >= 0.20 deg    12.9% of land
+    >= 0.40 deg     5.2%
+    >= 0.60 deg     2.4%
+    >= 1.00 deg     0.5%
 
 ## Region
 
