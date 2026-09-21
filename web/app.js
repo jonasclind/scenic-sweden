@@ -572,7 +572,13 @@ function buildMap() {
       ],
     },
     center: [(meta.lon0 + meta.lon1) / 2, (meta.lat0 + meta.lat1) / 2], zoom: 6.4,
-    attributionControl: { compact: MOBILE },
+    // The basemaps credit themselves through their own sources; the data the
+    // overlay is actually made of does not, and TessaDEM is ODbL while the
+    // canopy and land cover are CC BY 4.0. A public site has to say so.
+    attributionControl: { compact: MOBILE, customAttribution:
+      'Elevation <a target="_blank" rel="noopener noreferrer" href="https://tessadem.com/">TessaDEM</a> (ODbL) &middot; '
+      + 'Canopy <a target="_blank" rel="noopener noreferrer" href="https://registry.opendata.aws/dataforgood-fb-forests/">Meta &amp; WRI</a> (CC BY 4.0, imagery &copy; 2016 Maxar) &middot; '
+      + 'Land cover <a target="_blank" rel="noopener noreferrer" href="https://esa-worldcover.org/">ESA WorldCover</a> (CC BY 4.0)' },
   });
   window.map = map;
   map.addControl(new maplibregl.NavigationControl({ showCompass: !MOBILE }),
