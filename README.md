@@ -164,3 +164,31 @@ nothing. Split by cover at the observer, with today's canopy:
 Pilot terrain is TessaDEM v1.2 (~30 m, ODbL), already present on the T7 as a 54 GB global
 tarball. Phase 2 moves to Lantmäteriet *Markhöjdmodell grid 1+* (1 m, CC BY 4.0) plus
 Skogsstyrelsen tree heights (10 m, CC0) to build a surface model rather than buy one.
+
+## Deploying
+
+`scripts/build_dist.py` assembles `dist/` for a static host: the app shell, a
+`_headers` file, and every payload gzipped. Compression is done here rather than
+left to the host because static hosts negotiate `Content-Encoding` for text but
+not for `application/octet-stream`, which is what every `.bin` is. The client
+inflates with `DecompressionStream`, so the host needs no configuration.
+
+    2,463 MB -> 968 MB (61% saved), 2,470 files, largest 13.9 MB
+
+What that buys on a phone:
+
+    first screen (overview, standing + trees)   41.3 MB -> 10.7 MB
+    contours                                     5.6 MB ->  1.3 MB
+    one detail tile (~25 x 25 km)                4.7 MB ->  0.8 MB
+
+Each build stamps a `build` id into `meta.json` which the client appends to
+every payload URL, so `_headers` can claim a year of immutable caching without
+a rebuild ever serving stale data.
+
+    ./scripts/sync_region.sh              # T7 -> web/region
+    .venv/bin/python scripts/build_dist.py
+    .venv/bin/python scripts/serve.py --root dist 8732    # try it before uploading
+    npx wrangler pages deploy dist --project-name scenic-sweden
+
+Cloudflare Pages caps a project at 20,000 files and 25 MiB per file; this build
+is well inside both.

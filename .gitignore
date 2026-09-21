@@ -7,3 +7,4 @@ __pycache__/
 # region is built. Regenerate with scripts/export_*.py and build_region.py.
 web/layers/
 web/region/
+dist/

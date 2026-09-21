@@ -1,12 +1,16 @@
-import { DirectionWheel, RangeSlider } from './controls.js?v=7';
+import { DirectionWheel, RangeSlider } from './controls.js?v=8';
 
 /* The region is 91,000 km2 and one signature set is 294 MB, so nothing here
  * loads the whole thing. Two levels of tiles are fetched for whatever is on
  * screen, and the overlay is rendered for the current viewport rather than as
  * one fixed image over the region. */
 
-const CANVAS_MAX = 1100;          // long edge of the overlay bitmap
-const CELL_BUDGET = 700 * 700;    // cells we will score for one frame
+/* A phone has a fraction of the fill rate and of the memory, so it scores a
+ * smaller window into a smaller bitmap and keeps fewer tiles resident. */
+const MOBILE = matchMedia('(max-width: 720px)').matches;
+const CANVAS_MAX = MOBILE ? 700 : 1100;         // long edge of the overlay bitmap
+const CELL_BUDGET = (MOBILE ? 480 : 700) ** 2;  // cells we will score for one frame
+const CACHE_MAX = MOBILE ? 40 : 160;            // resident payloads, ~2.3 MB each
 const OPEN_GROUND_M = 2;          // canopy below this counts as open ground
 const DROP_SCALE = 4;             // sustained descent stored in quarter-degrees
 
@@ -27,6 +31,48 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
 /* ---------------------------------------------------------------- loading */
 
+/* Payloads ship gzipped and are inflated here rather than left to the host.
+ * Static hosts negotiate Content-Encoding for text but not for
+ * application/octet-stream, which is what a .bin is, and this region is 2.3 GB
+ * raw. The magic-byte test keeps one code path correct on a host that *does*
+ * decompress in transit. */
+async function inflate(buf) {
+  const h = new Uint8Array(buf, 0, Math.min(2, buf.byteLength));
+  if (h[0] !== 0x1f || h[1] !== 0x8b) return buf;
+  if (typeof DecompressionStream === 'undefined')
+    throw new Error('this browser cannot inflate gzip');
+  return new Response(new Blob([buf]).stream()
+    .pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+}
+
+async function fetchBuffer(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(r.status + ' ' + url);
+  return inflate(await r.arrayBuffer());
+}
+
+/* Every payload carries the build id, which is what makes a year of immutable
+ * caching safe: a rebuild changes the URL rather than the file's freshness. */
+const ver = url => meta.build ? `${url}?v=${meta.build}` : url;
+
+/* Tiles are ~2.3 MB each and there are 153 of them at detail level, so an
+ * unbounded cache is several hundred megabytes - enough to have a phone kill
+ * the tab. Everything on screen is touched every frame, so the least-recent
+ * end of the map is never something currently being drawn. */
+function touch(key) {
+  if (!cache.has(key)) return;
+  const v = cache.get(key);
+  cache.delete(key);
+  cache.set(key, v);
+}
+
+function evict() {
+  for (const k of cache.keys()) {
+    if (cache.size <= CACHE_MAX) return;
+    cache.delete(k);
+  }
+}
+
 function tileShape(L, iy, ix) {
   const lv = meta.levels[L];
   return [Math.min(lv.tile_rows, lv.rows - iy * lv.tile_rows),
@@ -37,10 +83,7 @@ function loadParts(key, L, iy, ix, parts) {
   if (inflight.has(key)) return;
   const base = `region/L${L}/${iy}_${ix}/`;
   inflight.set(key, Promise.all(parts.map(([f, T]) =>
-    fetch(base + f + '.bin').then(r => {
-      if (!r.ok) throw new Error(r.status + ' ' + base + f);
-      return r.arrayBuffer();
-    }).then(b => new T(b))
+    fetchBuffer(ver(base + f + (meta.bin_ext || '.bin'))).then(b => new T(b))
   )).then(vals => {
     const o = {};
     parts.forEach(([f], i) => { o[f.split('_')[0]] = vals[i]; });
@@ -63,6 +106,7 @@ function tile(L, iy, ix) {
   if (!cache.has(kb)) loadParts(kb, L, iy, ix,
     [['valid', Uint8Array], ['elev', Int16Array], ['canopy', Uint8Array],
      ['drop', Uint8Array]]);
+  touch(kd); touch(kb);
   const d = cache.get(kd), b = cache.get(kb);
   return (d && b) ? { ...d, ...b } : null;
 }
@@ -305,6 +349,7 @@ function scheduleRender() {
     draw(vwin, sc, top);
     const spots = topSpots(vwin, sc);
     placeMarkers(spots);
+    evict();
     document.getElementById('busy').hidden = inflight.size === 0;
 
     const sp = wheel.span();
@@ -441,6 +486,28 @@ function buildUI() {
   });
   const clarity = document.getElementById('clarity');
   clarity.addEventListener('input', () => setClarity(+clarity.value));
+
+  // On a phone the panel is a bottom sheet: tapping its title bar hands the
+  // screen back to the map. On a desktop the bar is not a control at all.
+  const panel = document.getElementById('panel');
+  const bar = document.getElementById('sheetbar');
+  const narrow = matchMedia('(max-width: 720px)');
+  // The map's own controls sit just above the sheet's collapsed height, which
+  // is the title bar plus the readout - both of which stay on screen when the
+  // sheet is shut. Measured rather than guessed, so it survives a long stat
+  // line wrapping to two rows.
+  const fitBar = () => document.documentElement.style.setProperty('--bar',
+    (bar.offsetHeight + document.getElementById('stat').offsetHeight) + 'px');
+  bar.addEventListener('click', () => {
+    if (!narrow.matches) return;
+    panel.dataset.open = panel.dataset.open === 'false' ? 'true' : 'false';
+  });
+  // The readout starts empty and grows once a frame has been scored, so it is
+  // observed rather than measured once at boot.
+  const ro = new ResizeObserver(fitBar);
+  ro.observe(bar);
+  ro.observe(document.getElementById('stat'));
+  addEventListener('resize', fitBar);
 }
 
 function renderTicks() {
@@ -463,7 +530,12 @@ const CONTOUR_MIN_ZOOM = 9;
 function ensureContours() {
   if (!state.contours || map.getSource('contours')) return;
   if (map.getZoom() < CONTOUR_MIN_ZOOM) return;
-  map.addSource('contours', { type: 'geojson', data: 'layers/contours_region.geojson' });
+  map.addSource('contours',
+    { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  fetchBuffer(ver('layers/contours_region' + (meta.geojson_ext || '.geojson')))
+    .then(b => map.getSource('contours')
+      .setData(JSON.parse(new TextDecoder().decode(b))))
+    .catch(e => console.warn('contours unavailable', e.message));
   map.addLayer({ id: 'contour-minor', type: 'line', source: 'contours',
     filter: ['!', ['get', 'major']], minzoom: 11,
     paint: { 'line-color': '#4a3f35', 'line-opacity': 0.45,
@@ -500,10 +572,16 @@ function buildMap() {
       ],
     },
     center: [(meta.lon0 + meta.lon1) / 2, (meta.lat0 + meta.lat1) / 2], zoom: 6.4,
-    attributionControl: { compact: false },
+    attributionControl: { compact: MOBILE },
   });
   window.map = map;
-  map.addControl(new maplibregl.NavigationControl(), 'bottom-right');
+  map.addControl(new maplibregl.NavigationControl({ showCompass: !MOBILE }),
+                 'bottom-right');
+  // The question on a road trip is "what is around me", which wants the
+  // device's own position rather than a search box.
+  map.addControl(new maplibregl.GeolocateControl({
+    positionOptions: { enableHighAccuracy: true },
+    trackUserLocation: true, showUserLocation: true }), 'bottom-right');
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 120 }), 'bottom-left');
   map.on('load', () => { setClarity(+document.getElementById('clarity').value); scheduleRender(); });
   map.on('moveend', () => { ensureContours(); scheduleRender(); });

@@ -85,10 +85,18 @@ export class DirectionWheel {
       t.textContent = lbl;
       this.svg.appendChild(t);
     }
-    this.handles = [0, 1].map(i => {
+    // A 7-unit circle is a ~15 px target, which is under half what a fingertip
+    // needs. The grab area is a transparent circle twice that size; the drawn
+    // handle rides on top of it and takes no pointer events of its own.
+    this.hits = [0, 1].map(i => {
+      const g = el('circle', {r: 15, fill: 'transparent', style: 'cursor:grab'});
+      g.dataset.h = i;
+      this.svg.appendChild(g);
+      return g;
+    });
+    this.handles = [0, 1].map(() => {
       const h = el('circle', {r: 7, fill: '#fff', stroke: 'var(--accent)',
-        'stroke-width': 2.5, style: 'cursor:grab'});
-      h.dataset.h = i;
+        'stroke-width': 2.5, 'pointer-events': 'none'});
       this.svg.appendChild(h);
       return h;
     });
@@ -107,9 +115,11 @@ export class DirectionWheel {
     }
     [this.start, this.end].forEach((d, i) => {
       const [x, y] = this._p(d, this.R);
-      this.handles[i].setAttribute('cx', x);
-      this.handles[i].setAttribute('cy', y);
-      this.handles[i].style.display = sp >= 359.8 ? 'none' : '';
+      for (const e of [this.handles[i], this.hits[i]]) {
+        e.setAttribute('cx', x);
+        e.setAttribute('cy', y);
+        e.style.display = sp >= 359.8 ? 'none' : '';
+      }
     });
   }
 

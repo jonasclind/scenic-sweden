@@ -13,8 +13,16 @@ from pathlib import Path
 
 # PORT from the environment first, so a launcher can assign one; then an
 # explicit argument; then a default for running it by hand.
-PORT = int(os.environ.get("PORT") or (sys.argv[1] if len(sys.argv) > 1 else 8731))
-ROOT = Path(__file__).resolve().parents[1] / "web"
+argv = sys.argv[1:]
+# --root serves a built copy instead of the working tree, which is the only way
+# to try a deploy - gzipped payloads and all - before uploading it.
+root = "web"
+if "--root" in argv:
+    i = argv.index("--root")
+    root = argv[i + 1]
+    del argv[i:i + 2]
+PORT = int(os.environ.get("PORT") or (argv[0] if argv else 8731))
+ROOT = Path(__file__).resolve().parents[1] / root
 
 
 # The preview launcher runs sandboxed and cannot read external volumes, so a

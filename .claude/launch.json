@@ -7,6 +7,13 @@
       "runtimeArgs": ["scripts/serve.py"],
       "port": 8731,
       "autoPort": true
+    },
+    {
+      "name": "scenic-dist",
+      "runtimeExecutable": "./.venv/bin/python",
+      "runtimeArgs": ["scripts/serve.py", "--root", "dist"],
+      "port": 8732,
+      "autoPort": true
     }
   ]
 }
