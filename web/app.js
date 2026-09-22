@@ -1,4 +1,6 @@
 import { DirectionWheel, RangeSlider } from './controls.js?v=8';
+import { sunPosition, solarTanField, sunlitMask, horizonCrossing }
+  from './sun.js?v=1';
 
 /* The region is 91,000 km2 and one signature set is 294 MB, so nothing here
  * loads the whole thing. Two levels of tiles are fetched for whatever is on
@@ -13,9 +15,11 @@ const CELL_BUDGET = (MOBILE ? 480 : 700) ** 2;  // cells we will score for one f
 const CACHE_MAX = MOBILE ? 40 : 160;            // resident payloads, ~2.3 MB each
 const OPEN_GROUND_M = 2;          // canopy below this counts as open ground
 const DROP_SCALE = 4;             // sustained descent stored in quarter-degrees
+const SUN_HALO_M = 20000;         // terrain pulled in up-sun, beyond the view
 
 const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false,
-                contours: true, siteMax: 99, minDrop: 0 };
+                contours: true, siteMax: 99, minDrop: 0,
+                sun: false, sunAt: new Date() };
 let meta, wheel, range, map, markers = [];
 const cache = new Map();
 const inflight = new Map();
@@ -97,18 +101,61 @@ function loadParts(key, L, iy, ix, parts) {
   }));
 }
 
-/** Returns the tile if resident, otherwise starts fetching and returns null. */
-function tile(L, iy, ix) {
-  const combo = `${state.veg}_${state.eye}`;
-  const kd = `${L}/${iy}/${ix}/${combo}`, kb = `${L}/${iy}/${ix}/base`;
-  if (!cache.has(kd)) loadParts(kd, L, iy, ix,
-    [[`dist_${combo}`, Uint8Array], [`water_${combo}`, Uint32Array]]);
+/** Terrain only: elevation, canopy, the land mask and the descent angles. */
+function baseTile(L, iy, ix) {
+  const kb = `${L}/${iy}/${ix}/base`;
   if (!cache.has(kb)) loadParts(kb, L, iy, ix,
     [['valid', Uint8Array], ['elev', Int16Array], ['canopy', Uint8Array],
      ['drop', Uint8Array]]);
-  touch(kd); touch(kb);
-  const d = cache.get(kd), b = cache.get(kb);
+  touch(kb);
+  return cache.get(kb) || null;
+}
+
+/** Returns the tile if resident, otherwise starts fetching and returns null. */
+function tile(L, iy, ix) {
+  const combo = `${state.veg}_${state.eye}`;
+  const kd = `${L}/${iy}/${ix}/${combo}`;
+  if (!cache.has(kd)) loadParts(kd, L, iy, ix,
+    [[`dist_${combo}`, Uint8Array], [`water_${combo}`, Uint32Array]]);
+  touch(kd);
+  const d = cache.get(kd), b = baseTile(L, iy, ix);
   return (d && b) ? { ...d, ...b } : null;
+}
+
+/** Elevation, canopy and the land mask over any rectangle of cells.
+ *
+ *  The sun sweep reaches far outside the view but wants none of the view
+ *  signatures out there, which are twenty times the bytes. */
+function terrainRect(L, y0, y1, x0, x1) {
+  const lv = meta.levels[L];
+  const w = x1 - x0 + 1, h = y1 - y0 + 1;
+  const valid = new Uint8Array(w * h);
+  const elev = new Int16Array(w * h);
+  const canopy = new Uint8Array(w * h);
+  let missing = 0;
+
+  const iy0 = Math.floor(y0 / lv.tile_rows), iy1 = Math.floor(y1 / lv.tile_rows);
+  const ix0 = Math.floor(x0 / lv.tile_cols), ix1 = Math.floor(x1 / lv.tile_cols);
+  for (let iy = iy0; iy <= iy1; iy++) {
+    for (let ix = ix0; ix <= ix1; ix++) {
+      const t = baseTile(L, iy, ix);
+      if (!t) { missing++; continue; }
+      const [th, tw] = tileShape(L, iy, ix);
+      const ty = iy * lv.tile_rows, tx = ix * lv.tile_cols;
+      const ys = Math.max(y0, ty), ye = Math.min(y1, ty + th - 1);
+      const xs = Math.max(x0, tx), xe = Math.min(x1, tx + tw - 1);
+      for (let y = ys; y <= ye; y++) {
+        const sr = (y - ty) * tw, dr = (y - y0) * w;
+        for (let x = xs; x <= xe; x++) {
+          const si = sr + (x - tx), di = dr + (x - x0);
+          valid[di] = t.valid[si];
+          elev[di] = t.elev[si];
+          canopy[di] = t.canopy[si];
+        }
+      }
+    }
+  }
+  return { valid, elev, canopy, missing, w, h };
 }
 
 /* ------------------------------------------------------------- view window */
@@ -173,6 +220,62 @@ function gather(vwin) {
   return { dist, water, valid, elev, canopy, drop, missing };
 }
 
+/* --------------------------------------------------------------------- sun */
+
+/* Which visible cells can see the sun at the chosen moment.
+ *
+ * Shadows at this hour are long - one degree of sun turns a 150 m ridge into
+ * an 8 km shadow - so the sweep is fed terrain well past the view: 20 km
+ * up-sun, which covers everything this relief can throw down to about half a
+ * degree of elevation. Below that the sun is within its own diameter of the
+ * horizon and the answer is "it is setting" whatever the terrain does.
+ *
+ * At the overview level the canopy is the quietest cover in each 400 m block
+ * rather than the tallest, so trees under-block there. Zoom in for the honest
+ * answer; the stat line already says which grid is in play. */
+function sunlit(vwin) {
+  const { L, lv, x0, y0, w, h } = vwin;
+  const at = sunPosition(state.sunAt,
+    lv.lat0 + (y0 + h / 2) * lv.dlat, lv.lon0 + (x0 + w / 2) * lv.dlon);
+
+  const ux = Math.sin(at.azimuth * Math.PI / 180);
+  const uy = Math.cos(at.azimuth * Math.PI / 180);
+  const halo = Math.round(SUN_HALO_M / lv.step_m);
+  const ax0 = Math.max(0, x0 - (ux < 0 ? halo : 0));
+  const ax1 = Math.min(lv.cols - 1, vwin.x1 + (ux > 0 ? halo : 0));
+  const ay0 = Math.max(0, y0 - (uy < 0 ? halo : 0));
+  const ay1 = Math.min(lv.rows - 1, vwin.y1 + (uy > 0 ? halo : 0));
+  const aw = ax1 - ax0 + 1, ah = ay1 - ay0 + 1;
+
+  const t = terrainRect(L, ay0, ay1, ax0, ax1);
+  const eyeM = state.eye / 100;
+  const trees = state.veg === 'trees';
+  const block = new Float32Array(aw * ah), eye = new Float32Array(aw * ah);
+  for (let i = 0; i < block.length; i++) {
+    // Sea and no-data both sit at zero: the sea really is there, and past the
+    // region a flat surface casts no shadow it has not earned.
+    const e = t.valid[i] ? t.elev[i] : 0;
+    const z = e === -32768 ? 0 : e;
+    block[i] = z + (trees ? t.canopy[i] : 0);
+    eye[i] = z + eyeM;
+  }
+  const tanE = solarTanField(state.sunAt, lv.lat0 + ay0 * lv.dlat, lv.dlat,
+                             lv.lon0 + ax0 * lv.dlon, lv.dlon, aw, ah);
+  const lit = sunlitMask(block, eye, tanE, aw, ah, at.azimuth, lv.step_m);
+
+  const mask = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const sr = (y + y0 - ay0) * aw + (x0 - ax0), dr = y * w;
+    for (let x = 0; x < w; x++) {
+      // Under a canopy taller than your eyes you are not in the sun whatever
+      // the skyline does: your own cover is nearer than the first step the
+      // sweep is able to take.
+      mask[dr + x] = (trees && t.canopy[sr + x] > eyeM) ? 0 : lit[sr + x];
+    }
+  }
+  return { mask, at, missing: t.missing };
+}
+
 /* ----------------------------------------------------------------- scoring */
 
 function selection() {
@@ -183,7 +286,7 @@ function selection() {
   return { bins, mask };
 }
 
-function score(vwin, data) {
+function score(vwin, data, sunMask) {
   const { w, h, lv } = vwin, A = meta.azimuths, n = w * h;
   const { bins, mask } = selection();
   const k = meta.max_dist_km * 1000 / 255;
@@ -233,6 +336,7 @@ function score(vwin, data) {
     if (v < loM || v > hiM) continue;
     if (data.canopy[c] > state.siteMax) continue;
     if (state.waterOnly && !(data.water[c] & mask)) continue;
+    if (sunMask && !sunMask[c]) continue;
     if (state.minDrop > 0) {
       // Mean sustained descent across the chosen directions, not the best one:
       // a single steep gully should not qualify an otherwise flat field.
@@ -343,7 +447,9 @@ function scheduleRender() {
     if (!vwin) { stat.textContent = 'outside the region'; return; }
     const data = gather(vwin);
     lastElev = { vwin, elev: data.elev };
-    const sc = score(vwin, data);
+    const sun = state.sun ? sunlit(vwin) : null;
+    sunReadout(sun);
+    const sc = score(vwin, data, sun && sun.mask);
     let top = 0;
     for (let i = 0; i < sc.length; i++) if (sc[i] > top) top = sc[i];
     draw(vwin, sc, top);
@@ -360,6 +466,24 @@ function scheduleRender() {
       + `<span class="dim"> · ${vwin.lv.step_m} m grid · ${(performance.now() - t0) | 0} ms`
       + (data.missing ? ` · ${data.missing} tiles loading` : '') + '</span>';
   });
+}
+
+/* The sun's own position at the middle of the view, so the date and time
+ * fields have something to answer back with. "Visible" throughout means the
+ * sun's centre clear of the skyline; between that and the last sliver of the
+ * upper limb there is about another two minutes. */
+function sunReadout(info) {
+  const el = document.getElementById('sunv');
+  if (!el || !state.sun) return;
+  if (!info) { el.textContent = 'no sun here'; return; }
+  const s = info.at, b = `bearing ${s.azimuth.toFixed(0)}°`;
+  // Set, in the usual sense, is the upper limb leaving a flat horizon. Standing
+  // high enough, with the ground falling away, you can still be looking at it -
+  // which is exactly the ground this filter is for. In between, the centre is
+  // under the horizon and the sun is half there.
+  el.innerHTML = s.elevation > 0 ? `sun ${s.elevation.toFixed(1)}° up, ${b}`
+    : s.geometric > -0.833 ? `sun on the horizon, ${b}`
+    : `<span class="dim">sun has set · ${b}</span>`;
 }
 
 function placeMarkers(spots) {
@@ -486,6 +610,41 @@ function buildUI() {
   });
   const clarity = document.getElementById('clarity');
   clarity.addEventListener('input', () => setClarity(+clarity.value));
+
+  // The date and time are read as the device's own local time, which is the
+  // Swedish clock for anyone who is actually standing in the region.
+  const sunOn = document.getElementById('sunon');
+  const sunDate = document.getElementById('sundate');
+  const sunTime = document.getElementById('suntime');
+  const pad = n => String(n).padStart(2, '0');
+  const readSun = () => {
+    const d = new Date(`${sunDate.value}T${sunTime.value || '12:00'}`);
+    if (!isNaN(d)) state.sunAt = d;
+  };
+  const setTime = d => { sunTime.value = `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+  const now = new Date();
+  sunDate.value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  setTime(now);
+  readSun();
+
+  sunOn.addEventListener('change', e => {
+    state.sun = e.target.checked;
+    document.getElementById('sunfields').hidden = !state.sun;
+    scheduleRender();
+  });
+  for (const el of [sunDate, sunTime])
+    el.addEventListener('change', () => { readSun(); scheduleRender(); });
+
+  // Sunset is the whole point of asking, and hunting for it a minute at a time
+  // through a time field would be miserable.
+  document.getElementById('tosunset').addEventListener('click', () => {
+    const c = map.getCenter();
+    const t = horizonCrossing(state.sunAt, c.lat, c.lng, true);
+    if (!t) return;                    // midnight sun, or a day with none
+    setTime(t);
+    readSun();
+    scheduleRender();
+  });
 
   // On a phone the panel is a bottom sheet: tapping its title bar hands the
   // screen back to the map. On a desktop the bar is not a control at all.

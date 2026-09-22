@@ -128,6 +128,47 @@ the slider tops out at 1.20 and shows metres per kilometre alongside.
     >= 0.60 deg     2.4%
     >= 1.00 deg     0.5%
 
+## Sun
+
+"Can see the sun" takes a date and a time and keeps only the spots where the
+sun's upper limb clears the local skyline. Upper limb, not centre: the two are
+nearly three minutes apart here and the whole of a sunset happens inside that
+gap. The Sunset button jumps the time to sunset at the middle of the map.
+
+Position is NOAA's algorithm, checked against day lengths rather than against
+remembered clock times - 18h05m at Gothenburg on midsummer, 7h01m at Lund at
+midwinter, 12h10m at the equinox, 24h at Kiruna.
+
+Visibility is not the 32-bin signature, which would smear a sunset over the
+45 minutes one bin is worth. It is a fresh shadow sweep over the elevation and
+canopy rasters at the exact solar azimuth. Marching every cell's ray would be
+a couple of hundred samples each, so instead the grid is swept once in the
+sun's direction, carrying the shadow envelope from line to line: O(cells)
+rather than O(cells x ray). Against a brute-force ray march on random terrain
+it disagrees on 0.0-0.5% of cells, all of them on a shadow's edge.
+
+Two details that are not details:
+
+  * The sun's elevation is computed per cell, not per window. Across the region
+    it varies by 4.5 degrees, which at sunset is the difference between
+    daylight and an hour past dark - the terminator really does cross the map.
+    Dropping the envelope by the *local* angle at each step is also what
+    accounts for the curve of the earth, since the sun stands higher by one
+    part in R for every metre you walk towards it. Only refraction's 13% of
+    that term is left out, 3.5 m over the longest shadow this relief throws.
+  * Ground that falls away can see a sun the valley below has lost, by up to
+    sqrt(2z/R) - 0.58 degrees for the 380 m of relief here. That band is the
+    whole point, so the sweep is allowed to argue inside it and is only cut off
+    a degree under the horizon.
+
+Limits: terrain is pulled 20 km up-sun, which covers every shadow this relief
+can throw down to about half a degree of elevation. A single azimuth serves the
+whole window - it varies by 3 degrees across the region, which slews a 10 km
+shadow by less than one 400 m cell. At the overview level the canopy is the
+*quietest* cover in each 400 m block rather than the tallest, so trees
+under-block there; zoom in for the honest answer. Date and time are read as the
+device's own clock, which is the Swedish one for anyone standing in the region.
+
 ## Region
 
 Skåne, Halland, southern Bohuslän and Västra Götaland: lat 55.30-59.20,

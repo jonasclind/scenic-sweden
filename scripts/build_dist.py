@@ -80,10 +80,15 @@ def main():
         shutil.rmtree(DIST)
     DIST.mkdir()
 
-    # The app shell. AppleDouble junk (._name) is an exFAT artefact of the T7
-    # copy; uploading it would double the file count for nothing.
-    for name in ("index.html", "app.js", "controls.js"):
-        shutil.copy2(WEB / name, DIST / name)
+    # The app shell, by glob rather than by name: a hand-kept list silently
+    # drops the next module someone adds, and the failure only shows up as a
+    # 404 in a deployed browser.
+    shell = sorted(f for f in WEB.iterdir()
+                   if f.is_file() and f.suffix in (".html", ".js", ".css")
+                   and not f.name.startswith("._"))
+    for f in shell:
+        shutil.copy2(f, DIST / f.name)
+    print("shell: " + ", ".join(f.name for f in shell))
     (DIST / "_headers").write_text(HEADERS)
 
     jobs = []

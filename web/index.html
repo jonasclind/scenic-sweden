@@ -50,7 +50,17 @@
   #presets button:hover{border-color:var(--accent);color:var(--accent)}
   .checks label{display:flex;gap:7px;align-items:center;cursor:pointer;font-size:12px;
     padding:2px 0}
-  .checks input{margin:0;accent-color:var(--accent)}
+  .checks input[type=checkbox]{margin:0;accent-color:var(--accent)}
+  .sunrow{display:flex;gap:5px;margin-top:8px}
+  .sunrow input{flex:1;min-width:0;font:inherit;font-size:11.5px;padding:3px 5px;
+    border:1px solid var(--line);border-radius:5px;background:#fff;color:var(--ink)}
+  .sunfoot{display:flex;gap:8px;align-items:center;margin-top:7px}
+  .sunfoot button{font:inherit;font-size:11px;padding:3px 9px;background:#fff;
+    border:1px solid var(--line);border-radius:5px;color:var(--ink-2);cursor:pointer;
+    flex:0 0 auto}
+  .sunfoot button:hover{border-color:var(--accent);color:var(--accent)}
+  #sunv{font-size:11px;color:var(--ink-2);font-variant-numeric:tabular-nums}
+  #sunv .dim{color:var(--ink-3)}
   input[type=range]{width:100%;accent-color:var(--accent)}
   .rowlbl{display:flex;justify-content:space-between;align-items:baseline;font-size:10px;
     color:var(--ink-3);font-variant-numeric:tabular-nums}
@@ -109,7 +119,10 @@
     .seg button{padding:10px 4px;font-size:13px}
     .eyeseg button{padding:8px 2px}
     .checks label{padding:7px 0;font-size:13px;gap:10px}
-    .checks input{width:18px;height:18px}
+    .checks input[type=checkbox]{width:18px;height:18px}
+    .sunrow input{font-size:13px;padding:7px 6px}
+    .sunfoot button{font-size:12px;padding:7px 11px}
+    #sunv{font-size:12px}
     .rs{height:32px}
     .rs .track{top:12px}
     .rs .knob{top:5px;width:23px;height:23px;margin-left:-11.5px}
@@ -152,6 +165,20 @@
       <label><input type="checkbox" id="bare"> Remove trees</label>
       <label><input type="checkbox" id="openonly"> Skip spots in forest</label>
       <label><input type="checkbox" id="contours" checked> Elevation contours</label>
+    </div>
+
+    <div class="grp checks">
+      <label><input type="checkbox" id="sunon"> Can see the sun</label>
+      <div id="sunfields" hidden>
+        <div class="sunrow">
+          <input type="date" id="sundate">
+          <input type="time" id="suntime">
+        </div>
+        <div class="sunfoot">
+          <button id="tosunset" type="button">Sunset</button>
+          <span id="sunv"></span>
+        </div>
+      </div>
     </div>
 
     <div class="grp">
