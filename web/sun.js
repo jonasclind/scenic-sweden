@@ -1,259 +1,304 @@
 /* Where the sun is, and which ground can see it.
  *
- * Two pieces that only meet at the end: NOAA's solar position algorithm, and a
- * shadow sweep over the terrain. Neither knows anything about the rest of the
- * app.
+ * Two independent pieces: NOAA's solar position algorithm, and a shadow sweep
+ * over a height grid. Neither knows anything about the rest of the app.
  */
 
-const rad = d => d * Math.PI / 180;
-const deg = r => r * 180 / Math.PI;
-const mod = (v, m) => ((v % m) + m) % m;
+const rad = deg => deg * Math.PI / 180;
+const deg = rad => rad * 180 / Math.PI;
+const wrap = (value, period) => ((value % period) + period) % period;
+const clampUnit = v => (v > 1 ? 1 : v < -1 ? -1 : v);
 
-/* Refraction near the horizon, NOAA's piecewise fit, in degrees.
+/* Half the sun's apparent width. "Can you see the sun" is a question about the
+ * upper limb, not the centre: the two are nearly three minutes apart at these
+ * latitudes, and the whole of a sunset happens inside that gap. */
+const SUN_SEMIDIAMETER_DEG = 0.2665;
+
+/* Sunrise and sunset are defined against this geometric elevation of the
+ * centre. The figure already carries refraction and the semidiameter, which is
+ * why it is compared against the *un*refracted angle. */
+const HORIZON_CROSSING_DEG = -0.833;
+
+/* Atmospheric refraction in arcseconds, NOAA's piecewise fit.
  *
- * This is not a rounding detail. At the horizon the atmosphere lifts the sun
- * by about 0.57 degrees - more than its own diameter - which is exactly why
- * you can still watch it after it has geometrically set. A sunset tool that
- * ignored it would close the show a couple of minutes early. */
-function refraction(e) {
-  if (e > 85) return 0;
-  const t = Math.tan(rad(e));
-  let r;
-  if (e > 5) r = 58.1 / t - 0.07 / t ** 3 + 0.000086 / t ** 5;
-  else if (e > -0.575) r = 1735 + e * (-518.2 + e * (103.4 + e * (-12.79 + e * 0.711)));
-  else r = -20.772 / t;
-  return r / 3600;
+ * Not a rounding detail: at the horizon it lifts the sun by about 0.57
+ * degrees, more than its own diameter, which is why you can still watch it
+ * after it has geometrically set. */
+function refractionArcsec(elevationDeg) {
+  if (elevationDeg > 85) return 0;
+  const tanElevation = Math.tan(rad(elevationDeg));
+  if (elevationDeg > 5)
+    return 58.1 / tanElevation - 0.07 / tanElevation ** 3
+         + 0.000086 / tanElevation ** 5;
+  if (elevationDeg > -0.575)
+    return 1735 + elevationDeg * (-518.2 + elevationDeg
+         * (103.4 + elevationDeg * (-12.79 + elevationDeg * 0.711)));
+  return -20.772 / tanElevation;
 }
 
-/* The part of the solar algorithm that depends only on the instant, not the
- * place. Everything here is UTC: going through a local timezone would only be
- * a chance to get an hour wrong twice a year. */
-function solarParams(date) {
-  const jd = date.getTime() / 86400000 + 2440587.5;
-  const T = (jd - 2451545.0) / 36525.0;
+/* The half of the solar algorithm that depends only on the instant, not the
+ * place. Names follow NOAA's published sheet closely enough to check against
+ * it. Everything is UTC; routing through a local timezone would only be a
+ * chance to be an hour wrong twice a year. */
+function solarInstant(when) {
+  const julianDay = when.getTime() / 86400000 + 2440587.5;
+  const centuries = (julianDay - 2451545.0) / 36525.0;
+  const t = centuries;
 
-  const L0 = mod(280.46646 + T * (36000.76983 + T * 0.0003032), 360);
-  const M = 357.52911 + T * (35999.05029 - 0.0001537 * T);
-  const ecc = 0.016708634 - T * (0.000042037 + 0.0000001267 * T);
-  const ctr = Math.sin(rad(M)) * (1.914602 - T * (0.004817 + 0.000014 * T))
-            + Math.sin(rad(2 * M)) * (0.019993 - 0.000101 * T)
-            + Math.sin(rad(3 * M)) * 0.000289;
+  const meanLongitude = wrap(280.46646 + t * (36000.76983 + t * 0.0003032), 360);
+  const meanAnomaly = 357.52911 + t * (35999.05029 - 0.0001537 * t);
+  const eccentricity = 0.016708634 - t * (0.000042037 + 0.0000001267 * t);
+  const equationOfCentre =
+      Math.sin(rad(meanAnomaly)) * (1.914602 - t * (0.004817 + 0.000014 * t))
+    + Math.sin(rad(2 * meanAnomaly)) * (0.019993 - 0.000101 * t)
+    + Math.sin(rad(3 * meanAnomaly)) * 0.000289;
 
-  const omega = 125.04 - 1934.136 * T;
-  const appLong = L0 + ctr - 0.00569 - 0.00478 * Math.sin(rad(omega));
-  const meanObliq = 23 + (26 + (21.448 - T * (46.815 + T * (0.00059 - T * 0.001813))) / 60) / 60;
-  const obliq = meanObliq + 0.00256 * Math.cos(rad(omega));
-  const decl = deg(Math.asin(Math.sin(rad(obliq)) * Math.sin(rad(appLong))));
+  const moonNode = 125.04 - 1934.136 * t;
+  const apparentLongitude = meanLongitude + equationOfCentre
+    - 0.00569 - 0.00478 * Math.sin(rad(moonNode));
+  const meanObliquity =
+    23 + (26 + (21.448 - t * (46.815 + t * (0.00059 - t * 0.001813))) / 60) / 60;
+  const obliquity = meanObliquity + 0.00256 * Math.cos(rad(moonNode));
+  const declination =
+    deg(Math.asin(Math.sin(rad(obliquity)) * Math.sin(rad(apparentLongitude))));
 
-  const vy = Math.tan(rad(obliq / 2)) ** 2;
-  const eqTime = 4 * deg(
-      vy * Math.sin(2 * rad(L0))
-    - 2 * ecc * Math.sin(rad(M))
-    + 4 * ecc * vy * Math.sin(rad(M)) * Math.cos(2 * rad(L0))
-    - 0.5 * vy * vy * Math.sin(4 * rad(L0))
-    - 1.25 * ecc * ecc * Math.sin(2 * rad(M)));
+  const y = Math.tan(rad(obliquity / 2)) ** 2;
+  const equationOfTimeMin = 4 * deg(
+      y * Math.sin(2 * rad(meanLongitude))
+    - 2 * eccentricity * Math.sin(rad(meanAnomaly))
+    + 4 * eccentricity * y * Math.sin(rad(meanAnomaly))
+        * Math.cos(2 * rad(meanLongitude))
+    - 0.5 * y * y * Math.sin(4 * rad(meanLongitude))
+    - 1.25 * eccentricity * eccentricity * Math.sin(2 * rad(meanAnomaly)));
 
-  const utcMin = date.getUTCHours() * 60 + date.getUTCMinutes()
-               + date.getUTCSeconds() / 60;
-  return { decl, eqTime, utcMin };
+  const minutesUtc = when.getUTCHours() * 60 + when.getUTCMinutes()
+                   + when.getUTCSeconds() / 60;
+  return { declination, equationOfTimeMin, minutesUtc };
 }
 
-/* Sun azimuth (degrees clockwise from north) and apparent elevation, for a
- * moment and a place. Good to about 0.01 degrees over the years this will see,
- * which is far finer than the terrain grid it gets compared against. */
-export function sunPosition(date, lat, lon) {
-  const { decl, eqTime, utcMin } = solarParams(date);
-  const ha = mod(utcMin + eqTime + 4 * lon, 1440) / 4 - 180;
+/** Hour angle in degrees: 0 at local solar noon, +15 per hour after it. */
+function hourAngleDeg({ equationOfTimeMin, minutesUtc }, lonDeg) {
+  return wrap(minutesUtc + equationOfTimeMin + 4 * lonDeg, 1440) / 4 - 180;
+}
 
-  const cosZ = Math.sin(rad(lat)) * Math.sin(rad(decl))
-             + Math.cos(rad(lat)) * Math.cos(rad(decl)) * Math.cos(rad(ha));
-  const zenith = deg(Math.acos(Math.min(1, Math.max(-1, cosZ))));
+/* Sun azimuth (degrees clockwise from north) and elevation, for a moment and a
+ * place. Good to about 0.01 degrees over the years this will see, far finer
+ * than the terrain grid it gets compared against. */
+export function sunPosition(when, latDeg, lonDeg) {
+  const instant = solarInstant(when);
+  const { declination } = instant;
+  const hourAngle = hourAngleDeg(instant, lonDeg);
+
+  const cosZenith = Math.sin(rad(latDeg)) * Math.sin(rad(declination))
+    + Math.cos(rad(latDeg)) * Math.cos(rad(declination)) * Math.cos(rad(hourAngle));
+  const zenith = deg(Math.acos(clampUnit(cosZenith)));
   const geometric = 90 - zenith;
 
-  const sinZ = Math.sin(rad(zenith));
-  let azimuth;
-  if (Math.abs(sinZ) < 1e-9) {
-    azimuth = 180;                       // sun overhead: bearing is undefined
-  } else {
-    const c = (Math.sin(rad(lat)) * Math.cos(rad(zenith)) - Math.sin(rad(decl)))
-            / (Math.cos(rad(lat)) * sinZ);
-    const a = deg(Math.acos(Math.min(1, Math.max(-1, c))));
-    azimuth = ha > 0 ? mod(a + 180, 360) : mod(540 - a, 360);
+  const sinZenith = Math.sin(rad(zenith));
+  let azimuth = 180;                     // sun overhead: bearing is undefined
+  if (Math.abs(sinZenith) > 1e-9) {
+    const cosAzimuth =
+      (Math.sin(rad(latDeg)) * Math.cos(rad(zenith)) - Math.sin(rad(declination)))
+      / (Math.cos(rad(latDeg)) * sinZenith);
+    const fromNorth = deg(Math.acos(clampUnit(cosAzimuth)));
+    azimuth = hourAngle > 0 ? wrap(fromNorth + 180, 360) : wrap(540 - fromNorth, 360);
   }
-  // The geometric elevation comes back too: sunrise and sunset are defined
-  // against it (-0.833 degrees, which already allows for refraction and the
-  // sun's own radius), not against the apparent one.
-  return { azimuth, elevation: geometric + refraction(geometric), geometric,
-           declination: decl, eqTime };
+  return {
+    azimuth,
+    geometric,                                                   // unrefracted
+    elevation: geometric + refractionArcsec(geometric) / 3600,   // as it looks
+    declination,
+  };
 }
 
-/* The local clock time of sunset (or sunrise) on a given day, as a Date, or
- * null where the sun does not cross the horizon at all. Found by scanning the
- * day a minute at a time, which is exact enough for a control that only offers
- * whole minutes and costs nothing at 1440 evaluations. */
-export function horizonCrossing(date, lat, lon, setting = true) {
-  const day = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  let prev = null;
-  for (let t = 0; t <= 1440; t++) {
-    const at = new Date(day.getTime() + t * 60000);
-    const up = sunPosition(at, lat, lon).geometric > -0.833;
-    if (prev !== null && prev !== up && up !== setting) return at;
-    prev = up;
+/* The clock time at which the sun sets (or rises) on a given day, or null on a
+ * day where it does not cross at all. Scanned a minute at a time: exact enough
+ * for a control that only offers whole minutes, and 1440 evaluations is
+ * nothing. */
+export function horizonCrossing(onDay, latDeg, lonDeg, setting = true) {
+  const midnight = new Date(onDay.getFullYear(), onDay.getMonth(), onDay.getDate());
+  let wasUp = null;
+  for (let minute = 0; minute <= 1440; minute++) {
+    const at = new Date(midnight.getTime() + minute * 60000);
+    const isUp = sunPosition(at, latDeg, lonDeg).geometric > HORIZON_CROSSING_DEG;
+    if (wasUp !== null && wasUp !== isUp && isUp !== setting) return at;
+    wasUp = isUp;
   }
   return null;
 }
 
-/* Half the sun's apparent width. "Can you see the sun" is a question about the
- * upper limb, not the centre - the two are nearly three minutes apart at these
- * latitudes, and the whole of a sunset happens inside that gap. */
-const SEMIDIAMETER = 0.2665;
+const SIN_5_DEG = Math.sin(rad(5));
+const SIN_85_DEG = Math.sin(rad(85));
 
-/* tan(apparent elevation of the sun's upper limb) for every cell of a lat/lon
- * grid, at one instant.
+/* tan of the apparent elevation of the sun's upper limb, given sin of the true
+ * elevation of its centre.
+ *
+ * Both corrections are wanted at every angle - refraction is still 0.16 degrees
+ * at five degrees up, and the limb is always 0.27 above the centre - so they
+ * cannot be branched away above some threshold without leaving a step in the
+ * mask. Instead the correction is carried onto the tangent through its own
+ * derivative, sec^2 = 1 + tan^2, which keeps the whole field free of arcsines
+ * and tangents. Measured against the exact form the worst error is a small
+ * fraction of the sun's own radius. */
+function tanApparentLimb(sinCentreElevation) {
+  const s = sinCentreElevation;
+  const tanCentre = s / Math.sqrt(1 - s * s);
+  // Near the zenith refraction has gone and no ground can shadow anything, so
+  // the raw tangent is answer enough - which is as well, since the derivative
+  // below runs away as tan does.
+  if (s > SIN_85_DEG) return tanCentre;
+
+  let arcsec;
+  if (s > SIN_5_DEG) {
+    arcsec = 58.1 / tanCentre - 0.07 / tanCentre ** 3 + 0.000086 / tanCentre ** 5;
+  } else {
+    // NOAA switches to a polynomial in the angle itself down here, and
+    // asin(s) = s(1 + s^2/6) is good to a millionth of a radian this low.
+    const elevationDeg = deg(s * (1 + s * s / 6));
+    arcsec = elevationDeg > -0.575
+      ? 1735 + elevationDeg * (-518.2 + elevationDeg
+          * (103.4 + elevationDeg * (-12.79 + elevationDeg * 0.711)))
+      : -20.772 / rad(elevationDeg);
+  }
+  const lift = rad(arcsec / 3600 + SUN_SEMIDIAMETER_DEG);
+  return tanCentre + lift * (1 + tanCentre * tanCentre);
+}
+
+/* tan(apparent elevation of the upper limb) for every cell of a lat/lon grid,
+ * at one instant.
  *
  * Per cell, not one value for the window: across the whole region the sun's
  * elevation varies by four and a half degrees, which around sunset is the
  * difference between broad daylight and an hour past dark. It is affordable
- * because the costly part of the algorithm depends only on the date, and what
- * is left factors into a per-row term and a per-column one. Away from the
- * horizon the per-cell work is then a square root, since sin(elevation) is
- * what the factoring hands you; only within five degrees of the horizon, where
- * refraction has to be taken seriously, does it cost an arcsine.
- */
-export function solarTanField(date, lat0, dlat, lon0, dlon, w, h) {
-  const { decl, eqTime, utcMin } = solarParams(date);
-  const sinDecl = Math.sin(rad(decl)), cosDecl = Math.cos(rad(decl));
+ * because the costly half of the algorithm depends only on the instant, and
+ * what is left factors into a per-row term and a per-column one. */
+export function sunElevationTangents(when, grid) {
+  const { lat0, dlat, lon0, dlon, width, height } = grid;
+  const instant = solarInstant(when);
+  const sinDeclination = Math.sin(rad(instant.declination));
+  const cosDeclination = Math.cos(rad(instant.declination));
 
-  const A = new Float64Array(h), B = new Float64Array(h);
-  for (let y = 0; y < h; y++) {
-    const la = rad(lat0 + y * dlat);
-    A[y] = Math.sin(la) * sinDecl;
-    B[y] = Math.cos(la) * cosDecl;
+  const rowSinTerm = new Float64Array(height);
+  const rowCosTerm = new Float64Array(height);
+  for (let y = 0; y < height; y++) {
+    const lat = rad(lat0 + y * dlat);
+    rowSinTerm[y] = Math.sin(lat) * sinDeclination;
+    rowCosTerm[y] = Math.cos(lat) * cosDeclination;
   }
-  const C = new Float64Array(w);
-  for (let x = 0; x < w; x++)
-    C[x] = Math.cos(rad(mod(utcMin + eqTime + 4 * (lon0 + x * dlon), 1440) / 4 - 180));
+  const columnCosHourAngle = new Float64Array(width);
+  for (let x = 0; x < width; x++)
+    columnCosHourAngle[x] = Math.cos(rad(hourAngleDeg(instant, lon0 + x * dlon)));
 
-  /* Near the horizon every cell needs refraction and the sun's own radius, and
-   * at a region-wide sunset that is every cell there is. Doing it exactly costs
-   * an arcsine and a tangent apiece, which measured at half a second a frame.
-   *
-   * At these angles both can be replaced by their leading terms: asin(s) is
-   * s(1 + s^2/6), tan of a small angle is the angle, and adding a correction c
-   * to a small angle adds c to its tangent. Checked against the exact form over
-   * the whole band, the worst error is far below the sun's own radius. */
-  const near = s => {
-    const e = deg(s * (1 + s * s / 6));
-    let r;
-    if (e > -0.575) r = 1735 + e * (-518.2 + e * (103.4 + e * (-12.79 + e * 0.711)));
-    else r = -20.772 / rad(e);
-    return s / Math.sqrt(1 - s * s) + rad(r / 3600 + SEMIDIAMETER);
-  };
-
-  const SIN5 = Math.sin(rad(5));
-  const out = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) {
-    const a = A[y], b = B[y], row = y * w;
-    for (let x = 0; x < w; x++) {
-      const s = a + b * C[x];                      // sin(centre elevation)
-      if (s > SIN5) {
-        // Well clear of the horizon both corrections are lost in the noise,
-        // and sin is already in hand, so tan costs one square root.
-        out[row + x] = s / Math.sqrt(1 - s * s);
-      } else {
-        out[row + x] = near(s);
-      }
-    }
+  const tangents = new Float32Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const sinTerm = rowSinTerm[y], cosTerm = rowCosTerm[y], row = y * width;
+    for (let x = 0; x < width; x++)
+      tangents[row + x] = tanApparentLimb(sinTerm + cosTerm * columnCosHourAngle[x]);
   }
-  return out;
+  return tangents;
 }
 
-const FAR = -1e9;      // "no blocker yet"; a sentinel rather than -Infinity so
-                       // that interpolating between two of them stays a number
+/* Sentinel for "no blocker found yet". A number rather than -Infinity, so that
+ * interpolating between two of them stays a number instead of going NaN. */
+const NO_BLOCKER = -1e9;
 
 /* How far below the astronomical horizon the terrain is still allowed to argue
  * that the sun is in view.
  *
- * Standing high with the ground falling away, your horizon dips by
- * sqrt(2z/R) - 0.58 degrees for the 380 m of relief this region has - and
- * inside that band a hilltop genuinely sees a sun that has set for the valley
- * below. That band is the entire point of the feature, so it cannot be gated
- * away. Past it the sweep is cut off outright: deep at night the only cells it
- * could call lit are ones at the very edge of the loaded terrain, where there
- * is no data up-sun to cast a shadow. One degree covers relief up to 1,100 m. */
-const NIGHT_TAN = Math.tan(rad(-1));
+ * Standing high with the ground falling away, your horizon dips by sqrt(2z/R) -
+ * 0.58 degrees for the 380 m of relief this region has - and inside that band a
+ * hilltop genuinely sees a sun the valley below has lost. That band is the
+ * point of the whole feature, so it cannot be gated away at zero. Past it the
+ * sweep is cut off outright: deep at night the only cells it could call lit are
+ * ones at the edge of the loaded grid, where there is no data up-sun to cast a
+ * shadow. One degree covers relief up to 1,100 m. */
+const TAN_LOWEST_USEFUL_SUN = Math.tan(rad(-1));
 
 /* Which cells can see the sun.
  *
- * The obvious method - march every cell's ray towards the sun and look for
- * anything above it - is a couple of hundred samples per cell, which for a
- * screenful is a hundred million and takes seconds. This sweeps the grid once
- * instead, in the sun's direction, carrying the shadow envelope from each line
- * to the next: the envelope at a cell is whatever the previous line reached,
- * dropped by one step's worth of the sun's angle.
+ * Marching each cell's ray towards the sun would be a couple of hundred samples
+ * per cell - a hundred million for a screenful, and seconds. This sweeps the
+ * grid once in the sun's direction instead, carrying a shadow envelope from one
+ * line to the next: the envelope at a cell is whatever the previous line
+ * reached, dropped by one step's worth of the sun's angle. Stepping a whole
+ * line at a time (rows or columns, whichever the sun leans towards) keeps the
+ * two cells being interpolated on a line that is already finished, so the
+ * recurrence is well ordered and the cost is O(cells) rather than
+ * O(cells x ray).
  *
- * The step is a whole row (or column, whichever the sun is more aligned with),
- * so the two cells being interpolated always lie on a line that is already
- * finished and the recurrence is well ordered. That is what makes it
- * O(cells) rather than O(cells x ray).
+ * Dropping the envelope by the *local* angle at each step is what accounts for
+ * the curve of the earth: the sun stands higher by one part in R for every
+ * metre you walk towards it, so a ray integrated along the path falls short of
+ * a flat-earth one by u^2/2R, which is exactly the curvature term. Only
+ * refraction's share of it is missed, 13% of 27 m over the longest shadow this
+ * terrain can throw.
  *
- * `tanE` carries the sun's angle per cell, and dropping the envelope by the
- * *local* angle at each step is what accounts for the curve of the earth: the
- * sun stands higher by one part in R_earth for every metre you walk towards
- * it, so a ray integrated along the path falls short of a flat-earth one by
- * u^2/2R - exactly the curvature term. What it misses is refraction's effect
- * on that term, 13% of 27 m over the longest shadow this terrain can throw.
- *
- * `block` is what stops light - ground plus canopy - and `eye` is where the
- * observer's eyes are. Both are heights in metres over the same grid. A single
- * azimuth is used for the whole grid: it varies by three degrees across the
- * full region, which slews a ten-kilometre shadow sideways by less than one
- * 400 m cell.
+ * One azimuth serves the whole grid. It varies by three degrees across the full
+ * region, which slews a ten-kilometre shadow sideways by less than one 400 m
+ * cell.
  */
-export function sunlitMask(block, eye, tanE, w, h, azimuth, stepM) {
-  const ux = Math.sin(rad(azimuth)), uy = Math.cos(rad(azimuth));
-  // Sweep along whichever axis the sun leans towards, so one step is one whole
-  // line and the cross-line drift stays inside a single cell.
-  const rows = Math.abs(uy) >= Math.abs(ux);
-  const nMaj = rows ? h : w, nMin = rows ? w : h;
-  const sMaj = rows ? w : 1, sMin = rows ? 1 : w;
-  const uMaj = rows ? uy : ux, uMin = rows ? ux : uy;
+export function sunlitMask({ blockingHeight, eyeHeight, tanSunElevation,
+                             width, height, azimuth, cellMetres }) {
+  const east = Math.sin(rad(azimuth)), north = Math.cos(rad(azimuth));
 
-  const dir = uMaj > 0 ? 1 : -1;                  // one step towards the sun
-  const off = uMin / Math.abs(uMaj);              // cross-line drift per step
-  const span = stepM * Math.sqrt(1 + off * off);  // metres covered by that step
+  // Sweep along whichever axis the sun leans towards, so that one step is one
+  // whole line and the drift across it stays inside a single cell.
+  const alongRows = Math.abs(north) >= Math.abs(east);
+  const lineCount = alongRows ? height : width;    // lines to sweep through
+  const lineLength = alongRows ? width : height;   // cells on each line
+  const lineStride = alongRows ? width : 1;        // index step between lines
+  const cellStride = alongRows ? 1 : width;        // index step along a line
+  const sunAlong = alongRows ? north : east;
+  const sunAcross = alongRows ? east : north;
 
-  const S = new Float32Array(w * h);
-  const env = new Float32Array(nMin);
-  const start = dir > 0 ? nMaj - 1 : 0, stop = dir > 0 ? -1 : nMaj;
+  const towardSun = sunAlong > 0 ? 1 : -1;
+  const driftPerLine = sunAcross / Math.abs(sunAlong);
+  const metresPerStep = cellMetres * Math.sqrt(1 + driftPerLine * driftPerLine);
 
-  for (let m = start; m !== stop; m -= dir) {
-    const src = m + dir, base = m * sMaj;
-    if (src < 0 || src >= nMaj) {                 // nothing beyond the edge
-      for (let k = 0; k < nMin; k++) S[base + k * sMin] = FAR;
+  const shadowHeight = new Float32Array(width * height);
+  const envelope = new Float32Array(lineLength);
+  const firstLine = towardSun > 0 ? lineCount - 1 : 0;
+  const pastLastLine = towardSun > 0 ? -1 : lineCount;
+
+  for (let line = firstLine; line !== pastLastLine; line -= towardSun) {
+    const lineStart = line * lineStride;
+    const sunwardLine = line + towardSun;
+    if (sunwardLine < 0 || sunwardLine >= lineCount) {      // nothing beyond
+      for (let cell = 0; cell < lineLength; cell++)
+        shadowHeight[lineStart + cell * cellStride] = NO_BLOCKER;
       continue;
     }
-    const sbase = src * sMaj;
-    for (let k = 0; k < nMin; k++) {
-      const i = sbase + k * sMin;
-      env[k] = block[i] > S[i] ? block[i] : S[i];
+    // Highest thing the light has grazed by the time it reaches that line,
+    // resolved before interpolating: max and interpolation do not commute.
+    const sunwardStart = sunwardLine * lineStride;
+    for (let cell = 0; cell < lineLength; cell++) {
+      const i = sunwardStart + cell * cellStride;
+      envelope[cell] = blockingHeight[i] > shadowHeight[i]
+        ? blockingHeight[i] : shadowHeight[i];
     }
-    for (let k = 0; k < nMin; k++) {
-      const i = base + k * sMin;
-      const p = k + off;
+    for (let cell = 0; cell < lineLength; cell++) {
+      const i = lineStart + cell * cellStride;
+      const source = cell + driftPerLine;
       // Past the end of the line there is no data, so cast no shadow. Clamping
-      // to the edge cell instead smears it outwards for ever, which builds a
-      // wall of false shadow along the sun-ward border - measurably, it was
-      // 95% of this sweep's disagreement with a brute-force ray march.
-      if (p < 0 || p > nMin - 1) { S[i] = FAR; continue; }
-      const i0 = p | 0, f = p - i0;
-      const i1 = i0 + 1 < nMin ? i0 + 1 : i0;
-      S[i] = env[i0] + (env[i1] - env[i0]) * f - tanE[i] * span;
+      // to the edge cell instead smears it outwards for ever and builds a wall
+      // of false shadow along the sun-ward border - measurably, it was 95% of
+      // this sweep's disagreement with a brute-force ray march.
+      if (source < 0 || source > lineLength - 1) {
+        shadowHeight[i] = NO_BLOCKER;
+        continue;
+      }
+      const lower = source | 0;
+      const upper = lower + 1 < lineLength ? lower + 1 : lower;
+      const blend = source - lower;
+      shadowHeight[i] = envelope[lower]
+        + (envelope[upper] - envelope[lower]) * blend
+        - tanSunElevation[i] * metresPerStep;
     }
   }
 
-  const lit = new Uint8Array(w * h);
-  for (let c = 0; c < lit.length; c++)
-    lit[c] = (tanE[c] > NIGHT_TAN && eye[c] >= S[c]) ? 1 : 0;
+  const lit = new Uint8Array(width * height);
+  for (let i = 0; i < lit.length; i++)
+    lit[i] = (tanSunElevation[i] > TAN_LOWEST_USEFUL_SUN
+              && eyeHeight[i] >= shadowHeight[i]) ? 1 : 0;
   return lit;
 }

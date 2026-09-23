@@ -142,19 +142,26 @@ export class DirectionWheel {
     };
     const move = ev => {
       if (drag === null) return;
-      const a = this._angleAt(ev);
+      const angle = this._angleAt(ev);
+      const wasStart = this.start, wasEnd = this.end;
       if (drag === 'arc') {
-        const d = this.snap(this.start + (a - grabbed)) - this.start;
-        if (!d) return;
-        grabbed += d;
-        this.start = (this.start + d + 360) % 360;
-        this.end = (this.end + d + 360) % 360;
+        const step = this.snap(this.start + (angle - grabbed)) - this.start;
+        if (!step) return;
+        grabbed += step;
+        this.start = (this.start + step + 360) % 360;
+        this.end = (this.end + step + 360) % 360;
       } else if (drag === 0) {
-        this.start = this.snap(a);
+        this.start = this.snap(angle);
       } else {
-        this.end = this.snap(a);
+        this.end = this.snap(angle);
       }
-      if (this.start === this.end) return;      // never collapse to nothing
+      // A collapsed arc has span() fall through to 360, so dragging the handles
+      // together would read as "all directions" - the opposite of the gesture.
+      // Refuse the move rather than leaving that showing until the next one.
+      if (this.start === this.end) {
+        this.start = wasStart; this.end = wasEnd;
+        return;
+      }
       this.render();
       this.onChange();
     };

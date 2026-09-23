@@ -1,6 +1,6 @@
-import { DirectionWheel, RangeSlider } from './controls.js?v=8';
-import { sunPosition, solarTanField, sunlitMask, horizonCrossing }
-  from './sun.js?v=1';
+import { DirectionWheel, RangeSlider } from './controls.js?v=9';
+import { sunPosition, sunElevationTangents, sunlitMask, horizonCrossing }
+  from './sun.js?v=2';
 
 /* The region is 91,000 km2 and one signature set is 294 MB, so nothing here
  * loads the whole thing. Two levels of tiles are fetched for whatever is on
@@ -16,14 +16,20 @@ const CACHE_MAX = MOBILE ? 40 : 160;            // resident payloads, ~2.3 MB ea
 const OPEN_GROUND_M = 2;          // canopy below this counts as open ground
 const DROP_SCALE = 4;             // sustained descent stored in quarter-degrees
 const SUN_HALO_M = 20000;         // terrain pulled in up-sun, beyond the view
+const NO_CANOPY_LIMIT = Infinity; // the site-cover filter, switched off
 
-const state = { base: 'sat', veg: 'trees', eye: 170, waterOnly: false,
-                contours: true, siteMax: 99, minDrop: 0,
-                sun: false, sunAt: new Date() };
+const state = {
+  basemap: 'sat',
+  vegetation: 'trees',            // 'trees' or 'bare'
+  eyeCm: 170,
+  requireWater: false,
+  contours: true,
+  maxSiteCanopyM: NO_CANOPY_LIMIT,
+  minDescentDeg: 0,
+  sunFilter: false,
+  sunWhen: new Date(),
+};
 let meta, wheel, range, map, markers = [];
-const cache = new Map();
-const inflight = new Map();
-let objUrl = null, pending = false;
 
 const BLANK = (() => {
   const c = document.createElement('canvas'); c.width = c.height = 1;
@@ -57,456 +63,574 @@ async function fetchBuffer(url) {
 
 /* Every payload carries the build id, which is what makes a year of immutable
  * caching safe: a rebuild changes the URL rather than the file's freshness. */
-const ver = url => meta.build ? `${url}?v=${meta.build}` : url;
+const versioned = url => meta.build ? `${url}?v=${meta.build}` : url;
 
-/* Tiles are ~2.3 MB each and there are 153 of them at detail level, so an
- * unbounded cache is several hundred megabytes - enough to have a phone kill
- * the tab. Everything on screen is touched every frame, so the least-recent
- * end of the map is never something currently being drawn. */
-function touch(key) {
+/* Payload cache, least-recently-used first (Map keeps insertion order).
+ *
+ * Tiles are ~2.3 MB each and the detail level has 153 of them, so holding
+ * everything is several hundred megabytes - enough for a phone to kill the tab.
+ *
+ * Keys used while drawing the current frame are recorded and never evicted.
+ * Without that, a working set larger than the limit evicts exactly what the
+ * next frame is about to ask for; the refetch triggers a re-render, which
+ * evicts again, and it never stops. Measured with the limit forced below the
+ * working set, that loop issued 70 requests a second on a map nobody was
+ * touching. With it, over-subscribing merely means the cache stops helping. */
+const cache = new Map();
+const inflight = new Map();
+const usedThisFrame = new Set();
+
+function useTile(key) {
+  usedThisFrame.add(key);
   if (!cache.has(key)) return;
-  const v = cache.get(key);
+  const payload = cache.get(key);
   cache.delete(key);
-  cache.set(key, v);
+  cache.set(key, payload);          // re-insert at the most-recent end
 }
 
-function evict() {
-  for (const k of cache.keys()) {
-    if (cache.size <= CACHE_MAX) return;
-    cache.delete(k);
+function evictUnusedTiles() {
+  for (const key of cache.keys()) {
+    if (cache.size <= CACHE_MAX) break;
+    if (!usedThisFrame.has(key)) cache.delete(key);
   }
 }
 
-function tileShape(L, iy, ix) {
-  const lv = meta.levels[L];
-  return [Math.min(lv.tile_rows, lv.rows - iy * lv.tile_rows),
-          Math.min(lv.tile_cols, lv.cols - ix * lv.tile_cols)];
+/** Edge tiles are short, so a tile's real size is not always the nominal one. */
+function tileShape(level, tileY, tileX) {
+  const grid = meta.levels[level];
+  return [Math.min(grid.tile_rows, grid.rows - tileY * grid.tile_rows),
+          Math.min(grid.tile_cols, grid.cols - tileX * grid.tile_cols)];
 }
 
-function loadParts(key, L, iy, ix, parts) {
+/* Fetches one cache entry: a list of [filename, TypedArray] pairs that arrive
+ * together and are keyed by the filename's stem, so `dist_trees_170.bin`
+ * becomes `dist`. */
+function loadPayload(key, level, tileY, tileX, parts) {
   if (inflight.has(key)) return;
-  const base = `region/L${L}/${iy}_${ix}/`;
-  inflight.set(key, Promise.all(parts.map(([f, T]) =>
-    fetchBuffer(ver(base + f + (meta.bin_ext || '.bin'))).then(b => new T(b))
-  )).then(vals => {
-    const o = {};
-    parts.forEach(([f], i) => { o[f.split('_')[0]] = vals[i]; });
-    cache.set(key, o);
+  const dir = `region/L${level}/${tileY}_${tileX}/`;
+  const extension = meta.bin_ext || '.bin';
+  inflight.set(key, Promise.all(parts.map(([file, ArrayType]) =>
+    fetchBuffer(versioned(dir + file + extension)).then(b => new ArrayType(b))
+  )).then(arrays => {
+    const payload = {};
+    parts.forEach(([file], i) => { payload[file.split('_')[0]] = arrays[i]; });
+    cache.set(key, payload);
     inflight.delete(key);
     scheduleRender();
-  }).catch(e => {
+  }).catch(err => {
     inflight.delete(key);
-    cache.set(key, null);              // missing tile: treat as empty, not retried
-    console.warn('tile unavailable', key, e.message);
+    // Null stands for "asked, got nothing", so the tile reads as empty instead
+    // of being requested again every frame. Eviction can drop the marker, and
+    // a later frame will then retry - which is what you want for a request
+    // that failed because the network was down.
+    cache.set(key, null);
+    console.warn('tile unavailable', key, err.message);
+    scheduleRender();                 // or the busy indicator never clears
   }));
 }
 
-/** Terrain only: elevation, canopy, the land mask and the descent angles. */
-function baseTile(L, iy, ix) {
-  const kb = `${L}/${iy}/${ix}/base`;
-  if (!cache.has(kb)) loadParts(kb, L, iy, ix,
+/* Terrain: elevation, canopy, the land mask and the descent angles. Split from
+ * the view signatures because the sun sweep wants terrain far outside the view
+ * and none of the signatures out there. Resident if returned, otherwise a fetch
+ * has been started and this is null. */
+function terrainTile(level, tileY, tileX) {
+  const key = `${level}/${tileY}/${tileX}/terrain`;
+  if (!cache.has(key)) loadPayload(key, level, tileY, tileX,
     [['valid', Uint8Array], ['elev', Int16Array], ['canopy', Uint8Array],
      ['drop', Uint8Array]]);
-  touch(kb);
-  return cache.get(kb) || null;
+  useTile(key);
+  return cache.get(key) || null;
 }
 
-/** Returns the tile if resident, otherwise starts fetching and returns null. */
-function tile(L, iy, ix) {
-  const combo = `${state.veg}_${state.eye}`;
-  const kd = `${L}/${iy}/${ix}/${combo}`;
-  if (!cache.has(kd)) loadParts(kd, L, iy, ix,
-    [[`dist_${combo}`, Uint8Array], [`water_${combo}`, Uint32Array]]);
-  touch(kd);
-  const d = cache.get(kd), b = baseTile(L, iy, ix);
-  return (d && b) ? { ...d, ...b } : null;
+/* Terrain plus the view signatures for the current eye height and vegetation
+ * state, which is what scoring needs. */
+function viewTile(level, tileY, tileX) {
+  const variant = `${state.vegetation}_${state.eyeCm}`;
+  const key = `${level}/${tileY}/${tileX}/${variant}`;
+  if (!cache.has(key)) loadPayload(key, level, tileY, tileX,
+    [[`dist_${variant}`, Uint8Array], [`water_${variant}`, Uint32Array]]);
+  useTile(key);
+  const signatures = cache.get(key), terrain = terrainTile(level, tileY, tileX);
+  return (signatures && terrain) ? { ...signatures, ...terrain } : null;
 }
 
-/** Elevation, canopy and the land mask over any rectangle of cells.
- *
- *  The sun sweep reaches far outside the view but wants none of the view
- *  signatures out there, which are twenty times the bytes. */
-function terrainRect(L, y0, y1, x0, x1) {
-  const lv = meta.levels[L];
-  const w = x1 - x0 + 1, h = y1 - y0 + 1;
-  const valid = new Uint8Array(w * h);
-  const elev = new Int16Array(w * h);
-  const canopy = new Uint8Array(w * h);
-  let missing = 0;
+/** Elevation, canopy and the land mask over any rectangle of cells. */
+function terrainRect(level, y0, y1, x0, x1) {
+  const grid = meta.levels[level];
+  const width = x1 - x0 + 1, height = y1 - y0 + 1;
+  const valid = new Uint8Array(width * height);
+  const elev = new Int16Array(width * height);
+  const canopy = new Uint8Array(width * height);
+  let missingTiles = 0;
 
-  const iy0 = Math.floor(y0 / lv.tile_rows), iy1 = Math.floor(y1 / lv.tile_rows);
-  const ix0 = Math.floor(x0 / lv.tile_cols), ix1 = Math.floor(x1 / lv.tile_cols);
-  for (let iy = iy0; iy <= iy1; iy++) {
-    for (let ix = ix0; ix <= ix1; ix++) {
-      const t = baseTile(L, iy, ix);
-      if (!t) { missing++; continue; }
-      const [th, tw] = tileShape(L, iy, ix);
-      const ty = iy * lv.tile_rows, tx = ix * lv.tile_cols;
-      const ys = Math.max(y0, ty), ye = Math.min(y1, ty + th - 1);
-      const xs = Math.max(x0, tx), xe = Math.min(x1, tx + tw - 1);
-      for (let y = ys; y <= ye; y++) {
-        const sr = (y - ty) * tw, dr = (y - y0) * w;
-        for (let x = xs; x <= xe; x++) {
-          const si = sr + (x - tx), di = dr + (x - x0);
-          valid[di] = t.valid[si];
-          elev[di] = t.elev[si];
-          canopy[di] = t.canopy[si];
+  for (let tileY = Math.floor(y0 / grid.tile_rows);
+           tileY <= Math.floor(y1 / grid.tile_rows); tileY++) {
+    for (let tileX = Math.floor(x0 / grid.tile_cols);
+             tileX <= Math.floor(x1 / grid.tile_cols); tileX++) {
+      const tile = terrainTile(level, tileY, tileX);
+      if (!tile) { missingTiles++; continue; }
+      const [tileHeight, tileWidth] = tileShape(level, tileY, tileX);
+      const originY = tileY * grid.tile_rows, originX = tileX * grid.tile_cols;
+      const fromY = Math.max(y0, originY);
+      const toY = Math.min(y1, originY + tileHeight - 1);
+      const fromX = Math.max(x0, originX);
+      const toX = Math.min(x1, originX + tileWidth - 1);
+      for (let y = fromY; y <= toY; y++) {
+        const tileRow = (y - originY) * tileWidth, outRow = (y - y0) * width;
+        for (let x = fromX; x <= toX; x++) {
+          const from = tileRow + (x - originX), to = outRow + (x - x0);
+          valid[to] = tile.valid[from];
+          elev[to] = tile.elev[from];
+          canopy[to] = tile.canopy[from];
         }
       }
     }
   }
-  return { valid, elev, canopy, missing, w, h };
+  return { valid, elev, canopy, missingTiles };
 }
 
 /* ------------------------------------------------------------- view window */
 
+/* The rectangle of cells currently on screen, at whichever level can be scored
+ * inside one frame. `x1`/`y1` are inclusive. */
 function viewWindow() {
-  const b = map.getBounds();
-  const W = Math.max(b.getWest(), meta.lon0), E = Math.min(b.getEast(), meta.lon1);
-  const S = Math.max(b.getSouth(), meta.lat0), N = Math.min(b.getNorth(), meta.lat1);
-  if (E <= W || N <= S) return null;
+  const bounds = map.getBounds();
+  const west = Math.max(bounds.getWest(), meta.lon0);
+  const east = Math.min(bounds.getEast(), meta.lon1);
+  const south = Math.max(bounds.getSouth(), meta.lat0);
+  const north = Math.min(bounds.getNorth(), meta.lat1);
+  if (east <= west || north <= south) return null;
 
-  let L = map.getZoom() >= meta.detail_min_zoom ? 1 : 0;
+  let level = map.getZoom() >= meta.detail_min_zoom ? 1 : 0;
   for (;;) {
-    const lv = meta.levels[L];
-    const x0 = clamp(Math.floor((W - lv.lon0) / lv.dlon), 0, lv.cols - 1);
-    const x1 = clamp(Math.ceil((E - lv.lon0) / lv.dlon), 0, lv.cols - 1);
-    const y0 = clamp(Math.floor((S - lv.lat0) / lv.dlat), 0, lv.rows - 1);
-    const y1 = clamp(Math.ceil((N - lv.lat0) / lv.dlat), 0, lv.rows - 1);
-    const w = x1 - x0 + 1, h = y1 - y0 + 1;
+    const grid = meta.levels[level];
+    const x0 = clamp(Math.floor((west - grid.lon0) / grid.dlon), 0, grid.cols - 1);
+    const x1 = clamp(Math.ceil((east - grid.lon0) / grid.dlon), 0, grid.cols - 1);
+    const y0 = clamp(Math.floor((south - grid.lat0) / grid.dlat), 0, grid.rows - 1);
+    const y1 = clamp(Math.ceil((north - grid.lat0) / grid.dlat), 0, grid.rows - 1);
+    const width = x1 - x0 + 1, height = y1 - y0 + 1;
     // Too much to score in a frame: drop to the coarser level rather than
     // freezing the page.
-    if (w * h > CELL_BUDGET && L > 0) { L--; continue; }
-    return { L, lv, x0, x1, y0, y1, w, h, W, E, S, N };
+    if (width * height > CELL_BUDGET && level > 0) { level--; continue; }
+    return { level, grid, x0, x1, y0, y1, width, height, west, east, south, north };
   }
 }
 
 /** Copy the visible rectangle out of whatever tiles are resident. */
-function gather(vwin) {
-  const { L, lv, x0, y0, w, h } = vwin;
-  const A = meta.azimuths;
-  const dist = new Uint8Array(w * h * A);
-  const water = new Uint32Array(w * h);
-  const valid = new Uint8Array(w * h);
-  const elev = new Int16Array(w * h);
-  const canopy = new Uint8Array(w * h);
-  const drop = new Uint8Array(w * h * A);
-  let missing = 0;
+function gather(view) {
+  const { level, grid, x0, y0, width, height } = view;
+  const azimuths = meta.azimuths;
+  const cells = width * height;
+  const dist = new Uint8Array(cells * azimuths);
+  const drop = new Uint8Array(cells * azimuths);
+  const water = new Uint32Array(cells);
+  const valid = new Uint8Array(cells);
+  const elev = new Int16Array(cells);
+  const canopy = new Uint8Array(cells);
+  let missingTiles = 0;
 
-  const iy0 = Math.floor(y0 / lv.tile_rows), iy1 = Math.floor(vwin.y1 / lv.tile_rows);
-  const ix0 = Math.floor(x0 / lv.tile_cols), ix1 = Math.floor(vwin.x1 / lv.tile_cols);
-  for (let iy = iy0; iy <= iy1; iy++) {
-    for (let ix = ix0; ix <= ix1; ix++) {
-      const t = tile(L, iy, ix);
-      if (!t) { missing++; continue; }
-      const [th, tw] = tileShape(L, iy, ix);
-      const ty = iy * lv.tile_rows, tx = ix * lv.tile_cols;
-      const ys = Math.max(y0, ty), ye = Math.min(vwin.y1, ty + th - 1);
-      const xs = Math.max(x0, tx), xe = Math.min(vwin.x1, tx + tw - 1);
-      for (let y = ys; y <= ye; y++) {
-        const srcRow = (y - ty) * tw, dstRow = (y - y0) * w;
-        for (let x = xs; x <= xe; x++) {
-          const si = srcRow + (x - tx), di = dstRow + (x - x0);
-          water[di] = t.water[si];
-          valid[di] = t.valid[si];
-          elev[di] = t.elev[si];
-          canopy[di] = t.canopy[si];
-          drop.set(t.drop.subarray(si * A, si * A + A), di * A);
-          dist.set(t.dist.subarray(si * A, si * A + A), di * A);
+  for (let tileY = Math.floor(y0 / grid.tile_rows);
+           tileY <= Math.floor(view.y1 / grid.tile_rows); tileY++) {
+    for (let tileX = Math.floor(x0 / grid.tile_cols);
+             tileX <= Math.floor(view.x1 / grid.tile_cols); tileX++) {
+      const tile = viewTile(level, tileY, tileX);
+      if (!tile) { missingTiles++; continue; }
+      const [tileHeight, tileWidth] = tileShape(level, tileY, tileX);
+      const originY = tileY * grid.tile_rows, originX = tileX * grid.tile_cols;
+      const fromY = Math.max(y0, originY);
+      const toY = Math.min(view.y1, originY + tileHeight - 1);
+      const fromX = Math.max(x0, originX);
+      const toX = Math.min(view.x1, originX + tileWidth - 1);
+      for (let y = fromY; y <= toY; y++) {
+        const tileRow = (y - originY) * tileWidth, outRow = (y - y0) * width;
+        for (let x = fromX; x <= toX; x++) {
+          const from = tileRow + (x - originX), to = outRow + (x - x0);
+          water[to] = tile.water[from];
+          valid[to] = tile.valid[from];
+          elev[to] = tile.elev[from];
+          canopy[to] = tile.canopy[from];
+          drop.set(tile.drop.subarray(from * azimuths, from * azimuths + azimuths),
+                   to * azimuths);
+          dist.set(tile.dist.subarray(from * azimuths, from * azimuths + azimuths),
+                   to * azimuths);
         }
       }
     }
   }
-  return { dist, water, valid, elev, canopy, drop, missing };
+  return { dist, water, valid, elev, canopy, drop, missingTiles };
 }
 
 /* --------------------------------------------------------------------- sun */
 
 /* Which visible cells can see the sun at the chosen moment.
  *
- * Shadows at this hour are long - one degree of sun turns a 150 m ridge into
- * an 8 km shadow - so the sweep is fed terrain well past the view: 20 km
- * up-sun, which covers everything this relief can throw down to about half a
- * degree of elevation. Below that the sun is within its own diameter of the
- * horizon and the answer is "it is setting" whatever the terrain does.
+ * Shadows at this hour are long - one degree of sun turns a 150 m ridge into an
+ * 8 km shadow - so the sweep is fed terrain well past the view: 20 km up-sun,
+ * which covers everything this relief can throw down to about half a degree of
+ * elevation. Below that the sun is within its own diameter of the horizon.
  *
- * At the overview level the canopy is the quietest cover in each 400 m block
- * rather than the tallest, so trees under-block there. Zoom in for the honest
- * answer; the stat line already says which grid is in play. */
-function sunlit(vwin) {
-  const { L, lv, x0, y0, w, h } = vwin;
-  const at = sunPosition(state.sunAt,
-    lv.lat0 + (y0 + h / 2) * lv.dlat, lv.lon0 + (x0 + w / 2) * lv.dlon);
+ * At the overview level the packed canopy is the *quietest* cover in each 400 m
+ * block rather than the tallest, so trees under-block there. Zoom in for the
+ * honest answer; the stat line already says which grid is in play. */
+function sunlitCells(view) {
+  const { level, grid, x0, y0, width, height } = view;
+  const sun = sunPosition(state.sunWhen,
+    grid.lat0 + (y0 + height / 2) * grid.dlat,
+    grid.lon0 + (x0 + width / 2) * grid.dlon);
 
-  const ux = Math.sin(at.azimuth * Math.PI / 180);
-  const uy = Math.cos(at.azimuth * Math.PI / 180);
-  const halo = Math.round(SUN_HALO_M / lv.step_m);
-  const ax0 = Math.max(0, x0 - (ux < 0 ? halo : 0));
-  const ax1 = Math.min(lv.cols - 1, vwin.x1 + (ux > 0 ? halo : 0));
-  const ay0 = Math.max(0, y0 - (uy < 0 ? halo : 0));
-  const ay1 = Math.min(lv.rows - 1, vwin.y1 + (uy > 0 ? halo : 0));
-  const aw = ax1 - ax0 + 1, ah = ay1 - ay0 + 1;
+  const east = Math.sin(sun.azimuth * Math.PI / 180);
+  const north = Math.cos(sun.azimuth * Math.PI / 180);
+  const haloCells = Math.round(SUN_HALO_M / grid.step_m);
+  // Extended towards the sun only: that is the one direction light arrives
+  // from, and a halo on the other three sides would be terrain nothing reads.
+  const sweepX0 = Math.max(0, x0 - (east < 0 ? haloCells : 0));
+  const sweepX1 = Math.min(grid.cols - 1, view.x1 + (east > 0 ? haloCells : 0));
+  const sweepY0 = Math.max(0, y0 - (north < 0 ? haloCells : 0));
+  const sweepY1 = Math.min(grid.rows - 1, view.y1 + (north > 0 ? haloCells : 0));
+  const sweepWidth = sweepX1 - sweepX0 + 1, sweepHeight = sweepY1 - sweepY0 + 1;
 
-  const t = terrainRect(L, ay0, ay1, ax0, ax1);
-  const eyeM = state.eye / 100;
-  const trees = state.veg === 'trees';
-  const block = new Float32Array(aw * ah), eye = new Float32Array(aw * ah);
-  for (let i = 0; i < block.length; i++) {
+  const terrain = terrainRect(level, sweepY0, sweepY1, sweepX0, sweepX1);
+  const eyeM = state.eyeCm / 100;
+  const treesBlock = state.vegetation === 'trees';
+  const blockingHeight = new Float32Array(sweepWidth * sweepHeight);
+  const eyeHeight = new Float32Array(sweepWidth * sweepHeight);
+  for (let i = 0; i < blockingHeight.length; i++) {
     // Sea and no-data both sit at zero: the sea really is there, and past the
     // region a flat surface casts no shadow it has not earned.
-    const e = t.valid[i] ? t.elev[i] : 0;
-    const z = e === -32768 ? 0 : e;
-    block[i] = z + (trees ? t.canopy[i] : 0);
-    eye[i] = z + eyeM;
+    const ground = terrain.valid[i] && terrain.elev[i] !== -32768 ? terrain.elev[i] : 0;
+    blockingHeight[i] = ground + (treesBlock ? terrain.canopy[i] : 0);
+    eyeHeight[i] = ground + eyeM;
   }
-  const tanE = solarTanField(state.sunAt, lv.lat0 + ay0 * lv.dlat, lv.dlat,
-                             lv.lon0 + ax0 * lv.dlon, lv.dlon, aw, ah);
-  const lit = sunlitMask(block, eye, tanE, aw, ah, at.azimuth, lv.step_m);
 
-  const mask = new Uint8Array(w * h);
-  for (let y = 0; y < h; y++) {
-    const sr = (y + y0 - ay0) * aw + (x0 - ax0), dr = y * w;
-    for (let x = 0; x < w; x++) {
+  const lit = sunlitMask({
+    blockingHeight, eyeHeight,
+    tanSunElevation: sunElevationTangents(state.sunWhen, {
+      lat0: grid.lat0 + sweepY0 * grid.dlat, dlat: grid.dlat,
+      lon0: grid.lon0 + sweepX0 * grid.dlon, dlon: grid.dlon,
+      width: sweepWidth, height: sweepHeight,
+    }),
+    width: sweepWidth, height: sweepHeight,
+    azimuth: sun.azimuth, cellMetres: grid.step_m,
+  });
+
+  const mask = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const sweepRow = (y + y0 - sweepY0) * sweepWidth + (x0 - sweepX0);
+    const maskRow = y * width;
+    for (let x = 0; x < width; x++) {
       // Under a canopy taller than your eyes you are not in the sun whatever
       // the skyline does: your own cover is nearer than the first step the
       // sweep is able to take.
-      mask[dr + x] = (trees && t.canopy[sr + x] > eyeM) ? 0 : lit[sr + x];
+      mask[maskRow + x] = (treesBlock && terrain.canopy[sweepRow + x] > eyeM)
+        ? 0 : lit[sweepRow + x];
     }
   }
-  return { mask, at, missing: t.missing };
+  return { mask, position: sun, missingTiles: terrain.missingTiles };
 }
 
 /* ----------------------------------------------------------------- scoring */
 
-function selection() {
-  const A = meta.azimuths, bins = [];
+/** The azimuth bins the direction wheel currently covers, as a list and a mask. */
+function selectedBins() {
+  const azimuths = meta.azimuths, bins = [];
   let mask = 0;
-  for (let b = 0; b < A; b++)
-    if (wheel.covers(b * 360 / A)) { bins.push(b); mask |= (1 << b); }
+  for (let bin = 0; bin < azimuths; bin++)
+    if (wheel.covers(bin * 360 / azimuths)) { bins.push(bin); mask |= (1 << bin); }
   return { bins, mask };
 }
 
-function score(vwin, data, sunMask) {
-  const { w, h, lv } = vwin, A = meta.azimuths, n = w * h;
-  const { bins, mask } = selection();
-  const k = meta.max_dist_km * 1000 / 255;
+/* Mean reach over the chosen directions, made robust across a plot, then
+ * filtered. The order matters: filtering before the robustness pass let a
+ * disqualified neighbour drag a qualifying cell to zero, which punished a spot
+ * for its surroundings failing a test it had passed itself. */
+function score(view, data, sunMask) {
+  const { width, height, grid } = view;
+  const azimuths = meta.azimuths, cells = width * height;
+  const { bins, mask } = selectedBins();
+  const metresPerUnit = meta.max_dist_km * 1000 / 255;
 
   // 1. How far you see, for every cell that is land. No filtering yet.
-  const raw = new Float32Array(n);
-  for (let c = 0; c < n; c++) {
-    if (!data.valid[c]) continue;
-    let sum = 0; const base = c * A;
-    for (let i = 0; i < bins.length; i++) sum += data.dist[base + bins[i]];
-    raw[c] = sum / bins.length * k;
+  const reach = new Float32Array(cells);
+  for (let cell = 0; cell < cells; cell++) {
+    if (!data.valid[cell]) continue;
+    let total = 0;
+    const base = cell * azimuths;
+    for (let i = 0; i < bins.length; i++) total += data.dist[base + bins[i]];
+    reach[cell] = total / bins.length * metresPerUnit;
   }
 
-  // 2. Does the score hold up across a plot? Radius in metres; at coarse levels
-  // one cell is already wider than the radius, so skip rather than smooth over
-  // kilometres and claim a precision the data has not got.
-  const r = Math.round(50 / lv.step_m);
-  let held = raw;
-  if (r >= 1) {
-    held = new Float32Array(n);
-    const win = new Float32Array((2 * r + 1) ** 2);
-    for (let y = r; y < h - r; y++) {
-      for (let x = r; x < w - r; x++) {
-        let m = 0;
-        for (let dy = -r; dy <= r; dy++)
-          for (let dx = -r; dx <= r; dx++) win[m++] = raw[(y + dy) * w + x + dx];
-        const q = Math.floor(m * 0.25);
-        for (let i = 0; i <= q; i++) {
-          let mi = i;
-          for (let j = i + 1; j < m; j++) if (win[j] < win[mi]) mi = j;
-          const t = win[i]; win[i] = win[mi]; win[mi] = t;
+  // 2. Does the score hold up across a plot? The 25th percentile of a 50 m
+  // neighbourhood, so one freak cell cannot carry a spot - but not the minimum,
+  // which is an extreme and made the map square. At coarse levels one cell is
+  // already wider than the radius, so skip rather than smooth over kilometres
+  // and claim a precision the data has not got.
+  const radiusCells = Math.round(50 / grid.step_m);
+  let plotReach = reach;
+  if (radiusCells >= 1) {
+    plotReach = new Float32Array(cells);
+    const span = 2 * radiusCells + 1;
+    const neighbourhood = new Float32Array(span * span);
+    const rank = Math.floor(span * span * 0.25);
+    for (let y = radiusCells; y < height - radiusCells; y++) {
+      for (let x = radiusCells; x < width - radiusCells; x++) {
+        let n = 0;
+        for (let dy = -radiusCells; dy <= radiusCells; dy++)
+          for (let dx = -radiusCells; dx <= radiusCells; dx++)
+            neighbourhood[n++] = reach[(y + dy) * width + x + dx];
+        // Partial selection sort: only the smallest `rank + 1` need ordering.
+        for (let i = 0; i <= rank; i++) {
+          let smallest = i;
+          for (let j = i + 1; j < n; j++)
+            if (neighbourhood[j] < neighbourhood[smallest]) smallest = j;
+          const swap = neighbourhood[i];
+          neighbourhood[i] = neighbourhood[smallest];
+          neighbourhood[smallest] = swap;
         }
-        held[y * w + x] = win[q];
+        plotReach[y * width + x] = neighbourhood[rank];
       }
     }
   }
 
-  // 3. Now the filters, as a mask over the finished score. Applying them before
-  // the step above let a filtered-out neighbour drag a qualifying cell to zero,
-  // which punished a spot for its surroundings failing a test it passed.
-  const loM = range.lo * 1000;
-  const hiM = range.capped() ? Infinity : range.hi * 1000;
-  const out = new Float32Array(n);
-  for (let c = 0; c < n; c++) {
-    const v = held[c];
-    if (!(v > 0)) continue;
-    if (v < loM || v > hiM) continue;
-    if (data.canopy[c] > state.siteMax) continue;
-    if (state.waterOnly && !(data.water[c] & mask)) continue;
-    if (sunMask && !sunMask[c]) continue;
-    if (state.minDrop > 0) {
+  // 3. The filters, as a mask over the finished score.
+  const minReachM = range.lo * 1000;
+  const maxReachM = range.capped() ? Infinity : range.hi * 1000;
+  const scores = new Float32Array(cells);
+  for (let cell = 0; cell < cells; cell++) {
+    const metres = plotReach[cell];
+    if (!(metres > 0)) continue;
+    if (metres < minReachM || metres > maxReachM) continue;
+    if (data.canopy[cell] > state.maxSiteCanopyM) continue;
+    if (state.requireWater && !(data.water[cell] & mask)) continue;
+    if (sunMask && !sunMask[cell]) continue;
+    if (state.minDescentDeg > 0) {
       // Mean sustained descent across the chosen directions, not the best one:
       // a single steep gully should not qualify an otherwise flat field.
-      let ds = 0; const db = c * A;
-      for (let i = 0; i < bins.length; i++) ds += data.drop[db + bins[i]];
-      if (ds / bins.length / DROP_SCALE < state.minDrop) continue;
+      let total = 0;
+      const base = cell * azimuths;
+      for (let i = 0; i < bins.length; i++) total += data.drop[base + bins[i]];
+      if (total / bins.length / DROP_SCALE < state.minDescentDeg) continue;
     }
-    out[c] = v;
+    scores[cell] = metres;
   }
-  return out;
+  return scores;
 }
 
 /* ----------------------------------------------------------------- drawing */
 
-let ramp;
-function draw(vwin, sc, top) {
-  const { w, h, W, E, S, N, lv, x0, y0 } = vwin;
+/* Colour ramp for reach, pale to near-black. Shared with the range slider's
+ * track, so the legend and the map cannot drift apart. */
+const RAMP_HEX = ['#FFF3E0', '#FBD89B', '#F5B35A', '#E8891C',
+                         '#C4620A', '#853B06', '#431C02'];
+const RAMP_RGB = RAMP_HEX.map(hex => [1, 3, 5].map(i => parseInt(hex.substr(i, 2), 16)));
+
+let overlayIssued = 0;      // frames that have started painting the overlay
+let overlayApplied = 0;     // newest frame whose bitmap reached the map
+let overlayUrl = null;
+
+function draw(view, scores, bestMetres) {
+  const { width, height, west, east, south, north, grid, x0, y0 } = view;
   // Both spans must be in Mercator units. Mercator x is proportional to
   // longitude in RADIANS; comparing degrees against a Mercator y span made the
   // canvas the wrong shape by a factor of ~57, collapsing one axis to a few
   // pixels and banding the overlay when it was stretched back out.
-  let cw = CANVAS_MAX, ch = CANVAS_MAX;
-  const spanX = (E - W) * Math.PI / 180;
-  const spanY = mercY(N) - mercY(S);
-  if (spanX / spanY > 1) ch = Math.max(64, Math.round(CANVAS_MAX * spanY / spanX));
-  else cw = Math.max(64, Math.round(CANVAS_MAX * spanX / spanY));
+  const spanX = (east - west) * Math.PI / 180;
+  const spanY = mercY(north) - mercY(south);
+  let canvasW = CANVAS_MAX, canvasH = CANVAS_MAX;
+  if (spanX > spanY) canvasH = Math.max(64, Math.round(CANVAS_MAX * spanY / spanX));
+  else canvasW = Math.max(64, Math.round(CANVAS_MAX * spanX / spanY));
 
-  const cv = document.getElementById('ovcanvas');
-  cv.width = cw; cv.height = ch;
-  const ctx = cv.getContext('2d');
-  const img = ctx.createImageData(cw, ch);
-  const px = img.data;
-  const lo = range.lo * 1000;
-  const hi = range.capped() ? Math.max(top, lo + 500) : range.hi * 1000;
-  const last = ramp.length - 1;
-  const myN = mercY(N), myS = mercY(S);
+  const canvas = document.getElementById('ovcanvas');
+  canvas.width = canvasW; canvas.height = canvasH;
+  const context = canvas.getContext('2d');
+  const image = context.createImageData(canvasW, canvasH);
+  const pixels = image.data;
 
-  for (let j = 0; j < ch; j++) {
-    const lat = invMercY(myN + (j / (ch - 1)) * (myS - myN));
-    const gy = Math.round((lat - lv.lat0) / lv.dlat) - y0;
-    const o = j * cw * 4;
-    if (gy < 0 || gy >= h) { for (let i = 0; i < cw; i++) px[o + i * 4 + 3] = 0; continue; }
-    const row = gy * w;
-    for (let i = 0; i < cw; i++) {
-      const lon = W + (i / (cw - 1)) * (E - W);
-      const gx = Math.round((lon - lv.lon0) / lv.dlon) - x0;
-      const p = o + i * 4;
-      if (gx < 0 || gx >= w) { px[p + 3] = 0; continue; }
-      const v = sc[row + gx];
-      if (!(v > 0)) { px[p + 3] = 0; continue; }
-      const t = Math.sqrt(clamp((v - lo) / (hi - lo), 0, 1));
-      const f = t * last, kk = Math.min(last - 1, f | 0), g = f - kk;
-      px[p]     = ramp[kk][0] + (ramp[kk + 1][0] - ramp[kk][0]) * g;
-      px[p + 1] = ramp[kk][1] + (ramp[kk + 1][1] - ramp[kk][1]) * g;
-      px[p + 2] = ramp[kk][2] + (ramp[kk + 1][2] - ramp[kk][2]) * g;
-      px[p + 3] = (0.22 + 0.72 * t) * 255;
+  const rampLow = range.lo * 1000;
+  const rampHigh = range.capped() ? Math.max(bestMetres, rampLow + 500)
+                                  : range.hi * 1000;
+  const lastStop = RAMP_RGB.length - 1;
+  const mercNorth = mercY(north), mercSouth = mercY(south);
+
+  for (let row = 0; row < canvasH; row++) {
+    const lat = invMercY(mercNorth + (row / (canvasH - 1)) * (mercSouth - mercNorth));
+    const cellY = Math.round((lat - grid.lat0) / grid.dlat) - y0;
+    const rowStart = row * canvasW * 4;
+    if (cellY < 0 || cellY >= height) {
+      for (let col = 0; col < canvasW; col++) pixels[rowStart + col * 4 + 3] = 0;
+      continue;
+    }
+    const cellRow = cellY * width;
+    for (let col = 0; col < canvasW; col++) {
+      const lon = west + (col / (canvasW - 1)) * (east - west);
+      const cellX = Math.round((lon - grid.lon0) / grid.dlon) - x0;
+      const pixel = rowStart + col * 4;
+      if (cellX < 0 || cellX >= width) { pixels[pixel + 3] = 0; continue; }
+      const metres = scores[cellRow + cellX];
+      if (!(metres > 0)) { pixels[pixel + 3] = 0; continue; }
+      // Square root, because reach is heavily skewed: on a linear ramp almost
+      // everything lands in the palest step and the interesting tail vanishes.
+      const t = Math.sqrt(clamp((metres - rampLow) / (rampHigh - rampLow), 0, 1));
+      const position = t * lastStop;
+      const stop = Math.min(lastStop - 1, position | 0);
+      const blend = position - stop;
+      for (let channel = 0; channel < 3; channel++)
+        pixels[pixel + channel] = RAMP_RGB[stop][channel]
+          + (RAMP_RGB[stop + 1][channel] - RAMP_RGB[stop][channel]) * blend;
+      pixels[pixel + 3] = (0.22 + 0.72 * t) * 255;
     }
   }
-  ctx.putImageData(img, 0, 0);
+  context.putImageData(image, 0, 0);
 
-  const src = map.getSource('ov');
-  if (src) {
-    cv.toBlob(b => {
-      const url = URL.createObjectURL(b);
-      src.updateImage({ url, coordinates: [[W, N], [E, N], [E, S], [W, S]] });
-      const stale = objUrl;
-      if (stale) setTimeout(() => URL.revokeObjectURL(stale), 4000);
-      objUrl = url;
-    }, 'image/png');
-  }
+  const source = map.getSource('ov');
+  if (!source) return;
+  const frame = ++overlayIssued;
+  canvas.toBlob(blob => {
+    // toBlob finishes asynchronously, so a slow frame can land after a newer
+    // one has already been shown. Dropping it keeps the overlay from flicking
+    // backwards onto stale scores.
+    if (frame < overlayApplied) return;
+    overlayApplied = frame;
+    const url = URL.createObjectURL(blob);
+    source.updateImage({ url, coordinates: [[west, north], [east, north],
+                                            [east, south], [west, south]] });
+    const previous = overlayUrl;
+    // MapLibre reads the blob after updateImage returns, so the old one cannot
+    // be released on the spot.
+    if (previous) setTimeout(() => URL.revokeObjectURL(previous), 4000);
+    overlayUrl = url;
+  }, 'image/png');
 }
 
-function topSpots(vwin, sc, count = 10) {
-  const { w, h, lv, x0, y0 } = vwin;
-  const sep = Math.max(3, Math.round(2000 / lv.step_m));
-  const a = Float32Array.from(sc), out = [];
-  for (let k = 0; k < count; k++) {
-    let best = 0, bi = -1;
-    for (let c = 0; c < a.length; c++) if (a[c] > best) { best = a[c]; bi = c; }
-    if (bi < 0) break;
-    const y = (bi / w) | 0, x = bi % w;
-    out.push({ km: best / 1000,
-               lat: lv.lat0 + (y + y0) * lv.dlat,
-               lon: lv.lon0 + (x + x0) * lv.dlon });
-    for (let dy = -sep; dy <= sep; dy++) {
-      const yy = y + dy; if (yy < 0 || yy >= h) continue;
-      for (let dx = -sep; dx <= sep; dx++) {
-        const xx = x + dx; if (xx < 0 || xx >= w) continue;
-        a[yy * w + xx] = 0;
+/* The best cells, with each pick blanking a 2 km disc around it so the list is
+ * ten places rather than ten pixels of one hillside. */
+function topSpots(view, scores, count = 10) {
+  const { width, height, grid, x0, y0 } = view;
+  const separation = Math.max(3, Math.round(2000 / grid.step_m));
+  const remaining = Float32Array.from(scores);
+  const spots = [];
+  for (let n = 0; n < count; n++) {
+    let bestMetres = 0, bestCell = -1;
+    for (let cell = 0; cell < remaining.length; cell++)
+      if (remaining[cell] > bestMetres) { bestMetres = remaining[cell]; bestCell = cell; }
+    if (bestCell < 0) break;
+    const y = (bestCell / width) | 0, x = bestCell % width;
+    spots.push({ km: bestMetres / 1000,
+                 lat: grid.lat0 + (y + y0) * grid.dlat,
+                 lon: grid.lon0 + (x + x0) * grid.dlon });
+    for (let dy = -separation; dy <= separation; dy++) {
+      const ny = y + dy;
+      if (ny < 0 || ny >= height) continue;
+      for (let dx = -separation; dx <= separation; dx++) {
+        const nx = x + dx;
+        if (nx < 0 || nx >= width) continue;
+        remaining[ny * width + nx] = 0;
       }
     }
   }
-  return out;
+  return spots;
 }
 
 /* ------------------------------------------------------------------- frame */
 
-let lastElev = null;
-function scheduleRender() {
-  if (pending) return;
-  pending = true;
-  requestAnimationFrame(() => {
-    pending = false;
-    if (!map || !map.isStyleLoaded()) { setTimeout(scheduleRender, 120); return; }
-    const t0 = performance.now();
-    const vwin = viewWindow();
-    const stat = document.getElementById('stat');
-    if (!vwin) { stat.textContent = 'outside the region'; return; }
-    const data = gather(vwin);
-    lastElev = { vwin, elev: data.elev };
-    const sun = state.sun ? sunlit(vwin) : null;
-    sunReadout(sun);
-    const sc = score(vwin, data, sun && sun.mask);
-    let top = 0;
-    for (let i = 0; i < sc.length; i++) if (sc[i] > top) top = sc[i];
-    draw(vwin, sc, top);
-    const spots = topSpots(vwin, sc);
-    placeMarkers(spots);
-    evict();
-    document.getElementById('busy').hidden = inflight.size === 0;
+let frameQueued = false;
+let lastScoredView = null;      // kept so a map click can report an elevation
 
-    const sp = wheel.span();
-    stat.innerHTML =
-      (sp >= 359.8 ? 'all directions'
-        : `${wheel.start.toFixed(0)}°–${wheel.end.toFixed(0)}° (${sp.toFixed(0)}°)`)
-      + ` · best ${spots.length ? spots[0].km.toFixed(1) : '—'} km`
-      + `<span class="dim"> · ${vwin.lv.step_m} m grid · ${(performance.now() - t0) | 0} ms`
-      + (data.missing ? ` · ${data.missing} tiles loading` : '') + '</span>';
-  });
+function scheduleRender() {
+  if (frameQueued) return;
+  frameQueued = true;
+  requestAnimationFrame(renderFrame);
 }
 
-/* The sun's own position at the middle of the view, so the date and time
- * fields have something to answer back with. "Visible" throughout means the
- * sun's centre clear of the skyline; between that and the last sliver of the
- * upper limb there is about another two minutes. */
-function sunReadout(info) {
+function renderFrame() {
+  // Stay queued across the wait, so the many callers that arrive while the
+  // style is loading share this one retry. Clearing the flag first let each of
+  // them start a timer of its own: eight callers left four chains polling for
+  // ever, and nothing ever merged them back.
+  if (!map || !map.isStyleLoaded()) {
+    setTimeout(() => { frameQueued = false; scheduleRender(); }, 120);
+    return;
+  }
+  frameQueued = false;
+  usedThisFrame.clear();
+
+  const startedAt = performance.now();
+  const stat = document.getElementById('stat');
+  const view = viewWindow();
+  if (!view) {
+    stat.textContent = 'outside the region';
+    document.getElementById('busy').hidden = inflight.size === 0;
+    return;
+  }
+
+  const data = gather(view);
+  lastScoredView = { view, elev: data.elev };
+  const sun = state.sunFilter ? sunlitCells(view) : null;
+  showSunPosition(sun && sun.position);
+
+  const scores = score(view, data, sun && sun.mask);
+  let bestMetres = 0;
+  for (let i = 0; i < scores.length; i++)
+    if (scores[i] > bestMetres) bestMetres = scores[i];
+
+  draw(view, scores, bestMetres);
+  placeMarkers(topSpots(view, scores));
+  evictUnusedTiles();
+  document.getElementById('busy').hidden = inflight.size === 0;
+
+  // Halo tiles count too: while they are missing the sun sweep sees flat ground
+  // up-sun and reports more sunlight than there is.
+  const loading = data.missingTiles + (sun ? sun.missingTiles : 0);
+  const arc = wheel.span();
+  stat.innerHTML =
+    (arc >= 359.8 ? 'all directions'
+      : `${wheel.start.toFixed(0)}°–${wheel.end.toFixed(0)}° (${arc.toFixed(0)}°)`)
+    + ` · best ${bestMetres ? (bestMetres / 1000).toFixed(1) : '—'} km`
+    + `<span class="dim"> · ${view.grid.step_m} m grid`
+    + ` · ${(performance.now() - startedAt) | 0} ms`
+    + (loading ? ` · ${loading} tiles loading` : '') + '</span>';
+}
+
+/* The sun's position at the middle of the view, so the date and time fields
+ * have something to answer back with. */
+function showSunPosition(position) {
   const el = document.getElementById('sunv');
-  if (!el || !state.sun) return;
-  if (!info) { el.textContent = 'no sun here'; return; }
-  const s = info.at, b = `bearing ${s.azimuth.toFixed(0)}°`;
-  // Set, in the usual sense, is the upper limb leaving a flat horizon. Standing
-  // high enough, with the ground falling away, you can still be looking at it -
-  // which is exactly the ground this filter is for. In between, the centre is
-  // under the horizon and the sun is half there.
-  el.innerHTML = s.elevation > 0 ? `sun ${s.elevation.toFixed(1)}° up, ${b}`
-    : s.geometric > -0.833 ? `sun on the horizon, ${b}`
-    : `<span class="dim">sun has set · ${b}</span>`;
+  if (!el || !position) return;
+  const bearing = `bearing ${position.azimuth.toFixed(0)}°`;
+  // Set, in the usual sense, is the upper limb leaving a *flat* horizon.
+  // Standing high with the ground falling away you can still be looking at it,
+  // which is exactly the ground this filter is for, so the map may well show
+  // lit cells after this says the sun has gone.
+  el.innerHTML =
+      position.elevation > 0 ? `sun ${position.elevation.toFixed(1)}° up, ${bearing}`
+    : position.geometric > -0.833 ? `sun on the horizon, ${bearing}`
+    : `<span class="dim">sun has set · ${bearing}</span>`;
 }
 
 function placeMarkers(spots) {
   markers.forEach(m => m.remove());
-  markers = spots.map((sp, i) => {
-    const el = document.createElement('div');
-    el.className = 'spot'; el.textContent = i + 1;
-    const pop = new maplibregl.Popup({ offset: 14 }).setHTML(
-      `<b>#${i + 1} — ${sp.km.toFixed(1)} km</b><br>${sp.lat.toFixed(5)}, ${sp.lon.toFixed(5)}<br>` +
-      `<a target="_blank" rel="noopener noreferrer" href="https://www.google.com/maps/search/?api=1&query=${sp.lat.toFixed(5)},${sp.lon.toFixed(5)}">open in Google Maps</a>`);
-    return new maplibregl.Marker({ element: el }).setLngLat([sp.lon, sp.lat])
-      .setPopup(pop).addTo(map);
+  markers = spots.map((spot, i) => {
+    const marker = document.createElement('div');
+    marker.className = 'spot';
+    marker.textContent = i + 1;
+    const here = `${spot.lat.toFixed(5)},${spot.lon.toFixed(5)}`;
+    const popup = new maplibregl.Popup({ offset: 14 }).setHTML(
+      `<b>#${i + 1} — ${spot.km.toFixed(1)} km</b><br>${spot.lat.toFixed(5)}, ${spot.lon.toFixed(5)}<br>`
+      + `<a target="_blank" rel="noopener noreferrer" `
+      + `href="https://www.google.com/maps/search/?api=1&query=${here}">open in Google Maps</a>`);
+    return new maplibregl.Marker({ element: marker }).setLngLat([spot.lon, spot.lat])
+      .setPopup(popup).addTo(map);
   });
 }
 
 function elevationAt(lat, lon) {
-  if (!lastElev) return '';
-  const { vwin, elev } = lastElev, lv = vwin.lv;
-  const gy = Math.round((lat - lv.lat0) / lv.dlat) - vwin.y0;
-  const gx = Math.round((lon - lv.lon0) / lv.dlon) - vwin.x0;
-  if (gy < 0 || gx < 0 || gy >= vwin.h || gx >= vwin.w) return 'outside the region';
-  const v = elev[gy * vwin.w + gx];
-  return v === -32768 ? 'no data' : `${v} m`;
+  if (!lastScoredView) return '';
+  const { view, elev } = lastScoredView, grid = view.grid;
+  const cellY = Math.round((lat - grid.lat0) / grid.dlat) - view.y0;
+  const cellX = Math.round((lon - grid.lon0) / grid.dlon) - view.x0;
+  if (cellY < 0 || cellX < 0 || cellY >= view.height || cellX >= view.width)
+    return 'outside the region';
+  const metres = elev[cellY * view.width + cellX];
+  return metres === -32768 ? 'no data' : `${metres} m`;
 }
 
 function setClarity(v) {
@@ -524,22 +648,18 @@ function setClarity(v) {
 
 (async function () {
   meta = await fetch('region/meta.json').then(r => r.json());
-  ramp = ['#FFF3E0', '#FBD89B', '#F5B35A', '#E8891C', '#C4620A', '#853B06', '#431C02']
-    .map(h => [1, 3, 5].map(i => parseInt(h.substr(i, 2), 16)));
-  meta.ramp = ['#FFF3E0', '#FBD89B', '#F5B35A', '#E8891C', '#C4620A', '#853B06', '#431C02'];
   buildUI();
   buildMap();
 })();
 
 function buildUI() {
   document.querySelector('#range .fill').style.background =
-    `linear-gradient(90deg, ${meta.ramp.join(',')})`;
+    `linear-gradient(90deg, ${RAMP_HEX.join(',')})`;
 
   wheel = new DirectionWheel(document.getElementById('wheel'), scheduleRender,
                            meta.azimuths);
   range = new RangeSlider(document.getElementById('range'), {
     max: meta.max_dist_km, lo: 0, hi: meta.max_dist_km, onChange: scheduleRender });
-  window.range = range; window.wheel = wheel;
   renderTicks();
 
   document.getElementById('presets').addEventListener('click', ev => {
@@ -553,53 +673,56 @@ function buildUI() {
   for (const e of meta.eyes) {
     const b = document.createElement('button');
     b.dataset.v = e.cm;
-    b.setAttribute('aria-pressed', String(e.cm === state.eye));
+    b.setAttribute('aria-pressed', String(e.cm === state.eyeCm));
     b.innerHTML = `${e.cm === 0 ? 'Ground' : e.cm === 170 ? 'Standing' : 'Second floor'}<em>${e.m} m</em>`;
     eyes.appendChild(b);
   }
   eyes.addEventListener('click', ev => {
     const b = ev.target.closest('button'); if (!b) return;
     [...eyes.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
-    state.eye = +b.dataset.v; scheduleRender();
+    state.eyeCm = +b.dataset.v; scheduleRender();
   });
 
   document.getElementById('base').addEventListener('click', ev => {
     const b = ev.target.closest('button'); if (!b) return;
     [...ev.currentTarget.children].forEach(c => c.setAttribute('aria-pressed', String(c === b)));
-    state.base = b.dataset.v;
-    map.setLayoutProperty('base-sat', 'visibility', state.base === 'sat' ? 'visible' : 'none');
-    map.setLayoutProperty('base-osm', 'visibility', state.base === 'osm' ? 'visible' : 'none');
+    state.basemap = b.dataset.v;
+    map.setLayoutProperty('base-sat', 'visibility',
+      state.basemap === 'sat' ? 'visible' : 'none');
+    map.setLayoutProperty('base-osm', 'visibility',
+      state.basemap === 'osm' ? 'visible' : 'none');
   });
 
   document.getElementById('water').addEventListener('change', e => {
-    state.waterOnly = e.target.checked; scheduleRender();
+    state.requireWater = e.target.checked; scheduleRender();
   });
 
   document.getElementById('bare').addEventListener('change', e => {
-    state.veg = e.target.checked ? 'bare' : 'trees'; scheduleRender();
+    state.vegetation = e.target.checked ? 'bare' : 'trees'; scheduleRender();
   });
 
-  // "Skip spots in forest" is the site filter as a plain switch: 2 m of cover
-  // is the line between standing in the open and standing under trees.
+  // "Skip spots in forest" is the site-cover filter as a plain switch: 2 m of
+  // canopy is the line between standing in the open and standing under trees.
   document.getElementById('openonly').addEventListener('change', e => {
-    state.siteMax = e.target.checked ? OPEN_GROUND_M : 99;
+    state.maxSiteCanopyM = e.target.checked ? OPEN_GROUND_M : NO_CANOPY_LIMIT;
     scheduleRender();
   });
 
   const slope = document.getElementById('slope');
-  const showSlope = () => {
+  const showDescent = () => {
     // Degrees are abstract at this scale - almost everything useful sits under
     // one degree - so show the equivalent drop per kilometre alongside.
     const el = document.getElementById('slopev');
-    if (state.minDrop <= 0) { el.textContent = 'any'; return; }
-    const mPerKm = Math.tan(state.minDrop * Math.PI / 180) * 1000;
-    el.textContent = `≥ ${state.minDrop.toFixed(2)}° · ${mPerKm.toFixed(0)} m/km`;
+    if (state.minDescentDeg <= 0) { el.textContent = 'any'; return; }
+    const metresPerKm = Math.tan(state.minDescentDeg * Math.PI / 180) * 1000;
+    el.textContent =
+      `≥ ${state.minDescentDeg.toFixed(2)}° · ${metresPerKm.toFixed(0)} m/km`;
   };
   slope.addEventListener('input', () => {
-    state.minDrop = +slope.value / 100;
-    showSlope(); scheduleRender();
+    state.minDescentDeg = +slope.value / 100;
+    showDescent(); scheduleRender();
   });
-  showSlope();
+  showDescent();
   const cont = document.getElementById('contours');
   cont.addEventListener('change', e => {
     state.contours = e.target.checked;
@@ -619,7 +742,7 @@ function buildUI() {
   const pad = n => String(n).padStart(2, '0');
   const readSun = () => {
     const d = new Date(`${sunDate.value}T${sunTime.value || '12:00'}`);
-    if (!isNaN(d)) state.sunAt = d;
+    if (!isNaN(d)) state.sunWhen = d;
   };
   const setTime = d => { sunTime.value = `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
   const now = new Date();
@@ -628,8 +751,8 @@ function buildUI() {
   readSun();
 
   sunOn.addEventListener('change', e => {
-    state.sun = e.target.checked;
-    document.getElementById('sunfields').hidden = !state.sun;
+    state.sunFilter = e.target.checked;
+    document.getElementById('sunfields').hidden = !state.sunFilter;
     scheduleRender();
   });
   for (const el of [sunDate, sunTime])
@@ -639,7 +762,7 @@ function buildUI() {
   // through a time field would be miserable.
   document.getElementById('tosunset').addEventListener('click', () => {
     const c = map.getCenter();
-    const t = horizonCrossing(state.sunAt, c.lat, c.lng, true);
+    const t = horizonCrossing(state.sunWhen, c.lat, c.lng, true);
     if (!t) return;                    // midnight sun, or a day with none
     setTime(t);
     readSun();
@@ -651,21 +774,31 @@ function buildUI() {
   const panel = document.getElementById('panel');
   const bar = document.getElementById('sheetbar');
   const narrow = matchMedia('(max-width: 720px)');
-  // The map's own controls sit just above the sheet's collapsed height, which
-  // is the title bar plus the readout - both of which stay on screen when the
-  // sheet is shut. Measured rather than guessed, so it survives a long stat
-  // line wrapping to two rows.
-  const fitBar = () => document.documentElement.style.setProperty('--bar',
-    (bar.offsetHeight + document.getElementById('stat').offsetHeight) + 'px');
+  // The map's own controls sit just above the sheet's collapsed height: the
+  // title bar plus the readout, both of which stay on screen when the sheet is
+  // shut. Measured rather than guessed, so a stat line that wraps to two rows
+  // does not end up behind the zoom buttons.
+  const stat = document.getElementById('stat');
+  let barHeight = -1;
+  const fitBar = () => {
+    if (!narrow.matches) return;        // --bar is only read by the phone rules
+    const height = bar.offsetHeight + stat.offsetHeight;
+    // The readout is rewritten every frame, so this fires constantly; reading
+    // offsetHeight forces layout, and writing the variable back would too.
+    if (height === barHeight) return;
+    barHeight = height;
+    document.documentElement.style.setProperty('--bar', height + 'px');
+  };
   bar.addEventListener('click', () => {
     if (!narrow.matches) return;
     panel.dataset.open = panel.dataset.open === 'false' ? 'true' : 'false';
   });
-  // The readout starts empty and grows once a frame has been scored, so it is
-  // observed rather than measured once at boot.
-  const ro = new ResizeObserver(fitBar);
-  ro.observe(bar);
-  ro.observe(document.getElementById('stat'));
+  // The readout starts empty and grows once a frame has been scored, so its
+  // height is observed rather than measured once at boot.
+  const observer = new ResizeObserver(fitBar);
+  observer.observe(bar);
+  observer.observe(stat);
+  narrow.addEventListener('change', () => { barHeight = -1; fitBar(); });
   addEventListener('resize', fitBar);
 }
 
@@ -691,7 +824,7 @@ function ensureContours() {
   if (map.getZoom() < CONTOUR_MIN_ZOOM) return;
   map.addSource('contours',
     { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-  fetchBuffer(ver('layers/contours_region' + (meta.geojson_ext || '.geojson')))
+  fetchBuffer(versioned('layers/contours_region' + (meta.geojson_ext || '.geojson')))
     .then(b => map.getSource('contours')
       .setData(JSON.parse(new TextDecoder().decode(b))))
     .catch(e => console.warn('contours unavailable', e.message));
@@ -739,7 +872,9 @@ function buildMap() {
       + 'Canopy <a target="_blank" rel="noopener noreferrer" href="https://registry.opendata.aws/dataforgood-fb-forests/">Meta &amp; WRI</a> (CC BY 4.0, imagery &copy; 2016 Maxar) &middot; '
       + 'Land cover <a target="_blank" rel="noopener noreferrer" href="https://esa-worldcover.org/">ESA WorldCover</a> (CC BY 4.0)' },
   });
-  window.map = map;
+  // Deliberate: the map, wheel and slider are reachable from the console, which
+  // is how everything in here gets checked against real ground.
+  Object.assign(window, { map, wheel, range, state });
   map.addControl(new maplibregl.NavigationControl({ showCompass: !MOBILE }),
                  'bottom-right');
   // The question on a road trip is "what is around me", which wants the
@@ -748,7 +883,16 @@ function buildMap() {
     positionOptions: { enableHighAccuracy: true },
     trackUserLocation: true, showUserLocation: true }), 'bottom-right');
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 120 }), 'bottom-left');
-  map.on('load', () => { setClarity(+document.getElementById('clarity').value); scheduleRender(); });
+  // MapLibre's compact attribution opens itself and never closes, so on a
+  // phone these credits sit across four lines of map for good. Shut it once the
+  // map settles; the (i) button still opens it, which is what the licences ask.
+  if (MOBILE) map.once('idle', () => document
+    .querySelector('.maplibregl-ctrl-attrib.maplibregl-compact')
+    ?.classList.remove('maplibregl-compact-show'));
+  map.on('load', () => {
+    setClarity(+document.getElementById('clarity').value);
+    scheduleRender();
+  });
   map.on('moveend', () => { ensureContours(); scheduleRender(); });
 
   map.on('mousemove', e => {
