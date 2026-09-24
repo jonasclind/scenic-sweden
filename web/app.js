@@ -1,6 +1,10 @@
 import { DirectionWheel, RangeSlider } from './controls.js?v=9';
 import { sunPosition, sunElevationTangents, sunlitMask, horizonCrossing }
   from './sun.js?v=2';
+import { loadFavourites, saveFavourites, withFavourite, withoutFavourite,
+         renameFavourite, mergeFavourites, favouriteId, favouritesInUrl,
+         shareUrl, googleMapsSearchUrl, googleMapsRouteUrl, ROUTE_MAX_STOPS }
+  from './favourites.js?v=1';
 
 /* The region is 91,000 km2 and one signature set is 294 MB, so nothing here
  * loads the whole thing. Two levels of tiles are fetched for whatever is on
@@ -30,6 +34,7 @@ const state = {
   sunWhen: new Date(),
 };
 let meta, wheel, range, map, markers = [];
+let favourites = [], favouriteMarkers = [], fitFavouritesOnLoad = null;
 
 const BLANK = (() => {
   const c = document.createElement('canvas'); c.width = c.height = 1;
@@ -612,14 +617,114 @@ function placeMarkers(spots) {
     const marker = document.createElement('div');
     marker.className = 'spot';
     marker.textContent = i + 1;
-    const here = `${spot.lat.toFixed(5)},${spot.lon.toFixed(5)}`;
     const popup = new maplibregl.Popup({ offset: 14 }).setHTML(
-      `<b>#${i + 1} — ${spot.km.toFixed(1)} km</b><br>${spot.lat.toFixed(5)}, ${spot.lon.toFixed(5)}<br>`
-      + `<a target="_blank" rel="noopener noreferrer" `
-      + `href="https://www.google.com/maps/search/?api=1&query=${here}">open in Google Maps</a>`);
+      `<b>#${i + 1} — ${spot.km.toFixed(1)} km</b><br>`
+      + spotPopupBody(spot.lat, spot.lon));
     return new maplibregl.Marker({ element: marker }).setLngLat([spot.lon, spot.lat])
       .setPopup(popup).addTo(map);
   });
+}
+
+/* ------------------------------------------------------------- favourites */
+
+/* Shared by both popups. The save button carries its coordinates rather than
+ * closing over them, because MapLibre builds popup DOM from a string and there
+ * is nothing to bind a listener to until it is on the page. */
+function spotPopupBody(lat, lon) {
+  const saved = isSaved(lat, lon);
+  return `${lat.toFixed(5)}, ${lon.toFixed(5)}<br>`
+    + `<a target="_blank" rel="noopener noreferrer" `
+    + `href="${googleMapsSearchUrl(lat, lon)}">open in Google Maps</a><br>`
+    + `<button class="savebtn" data-save="${lat.toFixed(5)},${lon.toFixed(5)}"`
+    + `${saved ? ' disabled' : ''}>${saved ? '★ Saved' : '☆ Save this spot'}</button>`;
+}
+
+const isSaved = (lat, lon) =>
+  favourites.some(s => favouriteId(s.lat, s.lon) === favouriteId(lat, lon));
+
+function setFavourites(list, message) {
+  favourites = list;
+  if (!saveFavourites(favourites))
+    message = 'this browser will not store them - keep the share link';
+  renderFavourites(message || '');
+}
+
+/* Called with no argument the note is left alone, which matters because the map
+ * finishes loading after a shared link has been imported and re-renders to put
+ * the markers up - and would otherwise wipe the line saying what just arrived. */
+let favouriteNote = '';
+function renderFavourites(message) {
+  if (message !== undefined) favouriteNote = message;
+  document.getElementById('favcount').textContent =
+    favourites.length ? `${favourites.length}` : '';
+
+  const list = document.getElementById('favlist');
+  list.innerHTML = '';
+  for (const spot of favourites) {
+    const id = favouriteId(spot.lat, spot.lon);
+    const row = document.createElement('li');
+    row.dataset.id = id;
+    row.innerHTML =
+        `<input class="favname" value="" placeholder="${id}" maxlength="60">`
+      + `<button class="favgo" type="button" title="Show on the map">◎</button>`
+      + `<a class="favmap" target="_blank" rel="noopener noreferrer" `
+      + `href="${googleMapsSearchUrl(spot.lat, spot.lon)}" title="Open in Google Maps">↗</a>`
+      + `<button class="favdel" type="button" title="Remove">×</button>`;
+    // Set through the property, not the attribute, so a name with quotes in it
+    // cannot break out of the markup.
+    row.querySelector('.favname').value = spot.name || '';
+    list.appendChild(row);
+  }
+
+  const empty = favourites.length === 0;
+  document.getElementById('favshare').disabled = empty;
+  document.getElementById('favroute').disabled = empty;
+  document.getElementById('favmsg').textContent = favouriteNote
+    || (empty ? 'Click the map, then Save.' : '');
+
+  favouriteMarkers.forEach(m => m.remove());
+  favouriteMarkers = !map ? [] : favourites.map(spot => {
+    const el = document.createElement('div');
+    el.className = 'fav';
+    el.textContent = '★';
+    el.title = spot.name || favouriteId(spot.lat, spot.lon);
+    return new maplibregl.Marker({ element: el })
+      .setLngLat([spot.lon, spot.lat])
+      .setPopup(new maplibregl.Popup({ offset: 14 }).setHTML(
+        `<b>${spot.name || 'Saved spot'}</b><br>`
+        + spotPopupBody(spot.lat, spot.lon)))
+      .addTo(map);
+  });
+}
+
+/* Sending the list somewhere. The native share sheet is the one that can reach
+ * a phone from a laptop in one step, so it is tried first; the clipboard is the
+ * desktop path; and if both are refused the link is put on screen to copy by
+ * hand rather than failing silently. */
+async function shareFavourites() {
+  const url = await shareUrl(favourites, location.origin + location.pathname);
+  const label = `${favourites.length} spot${favourites.length === 1 ? '' : 's'}`;
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'Scenic View Finder', url });
+      return renderFavourites(`shared ${label}`);
+    } catch (err) {
+      if (err.name === 'AbortError') return;      // the user closed the sheet
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(url);
+    renderFavourites(`link to ${label} copied`);
+  } catch {
+    renderFavourites('');
+    const box = document.getElementById('favmsg');
+    box.textContent = 'copy this link:';
+    const field = document.createElement('input');
+    field.readOnly = true;
+    field.value = url;
+    box.appendChild(field);
+    field.select();
+  }
 }
 
 function elevationAt(lat, lon) {
@@ -650,7 +755,34 @@ function setClarity(v) {
   meta = await fetch('region/meta.json').then(r => r.json());
   buildUI();
   buildMap();
+  await importSharedFavourites();
+  // Pasting a share link into a tab that is already on the site changes only
+  // the fragment, which the browser handles without reloading anything.
+  addEventListener('hashchange', importSharedFavourites);
 })();
+
+/* A link someone was sent carries the spots in its fragment. They are merged in
+ * rather than replacing anything, the fragment is cleared so a reload does not
+ * re-announce them, and the map is moved to show what arrived. */
+async function importSharedFavourites() {
+  const incoming = await favouritesInUrl();
+  if (!incoming.length) return;
+  const { list, added } = mergeFavourites(favourites, incoming);
+  setFavourites(list, added
+    ? `added ${added} shared spot${added === 1 ? '' : 's'}`
+    : 'those spots were already saved');
+  history.replaceState(null, '', location.pathname + location.search);
+  if (map && map.isStyleLoaded()) fitToSpots(incoming);
+  else fitFavouritesOnLoad = incoming;
+}
+
+function fitToSpots(spots) {
+  if (!spots.length) return;
+  const bounds = new maplibregl.LngLatBounds(
+    [spots[0].lon, spots[0].lat], [spots[0].lon, spots[0].lat]);
+  for (const spot of spots) bounds.extend([spot.lon, spot.lat]);
+  map.fitBounds(bounds, { padding: 70, maxZoom: 13, duration: 0 });
+}
 
 function buildUI() {
   document.querySelector('#range .fill').style.background =
@@ -767,6 +899,53 @@ function buildUI() {
     setTime(t);
     readSun();
     scheduleRender();
+  });
+
+  favourites = loadFavourites();
+  renderFavourites();
+
+  document.getElementById('favlist').addEventListener('click', ev => {
+    const row = ev.target.closest('li');
+    if (!row) return;
+    const spot = favourites.find(s => favouriteId(s.lat, s.lon) === row.dataset.id);
+    if (!spot) return;
+    if (ev.target.closest('.favgo'))
+      map.flyTo({ center: [spot.lon, spot.lat], zoom: Math.max(map.getZoom(), 13) });
+    else if (ev.target.closest('.favdel'))
+      setFavourites(withoutFavourite(favourites, row.dataset.id));
+  });
+
+  // Renaming writes straight through without re-rendering: rebuilding the list
+  // on every keystroke would take the focus out of the field being typed in.
+  document.getElementById('favlist').addEventListener('input', ev => {
+    const row = ev.target.closest('li');
+    if (!row || !ev.target.classList.contains('favname')) return;
+    favourites = renameFavourite(favourites, row.dataset.id, ev.target.value);
+    saveFavourites(favourites);
+  });
+  document.getElementById('favlist').addEventListener('change', ev => {
+    if (ev.target.classList.contains('favname')) renderFavourites();
+  });
+
+  document.getElementById('favshare').addEventListener('click', shareFavourites);
+  document.getElementById('favroute').addEventListener('click', () => {
+    const url = googleMapsRouteUrl(favourites);
+    if (!url) return;
+    window.open(url, '_blank', 'noopener');
+    renderFavourites(favourites.length > ROUTE_MAX_STOPS
+      ? `Google Maps takes ${ROUTE_MAX_STOPS} stops - routed the first ${ROUTE_MAX_STOPS}`
+      : '');
+  });
+
+  // The save buttons live inside MapLibre popups, which are built from a string
+  // and replaced whenever a popup reopens, so the listener sits on the document.
+  document.addEventListener('click', ev => {
+    const button = ev.target.closest('.savebtn');
+    if (!button) return;
+    const [lat, lon] = button.dataset.save.split(',').map(Number);
+    setFavourites(withFavourite(favourites, { lat, lon }));
+    button.disabled = true;
+    button.textContent = '★ Saved';
   });
 
   // On a phone the panel is a bottom sheet: tapping its title bar hands the
@@ -891,6 +1070,11 @@ function buildMap() {
     ?.classList.remove('maplibregl-compact-show'));
   map.on('load', () => {
     setClarity(+document.getElementById('clarity').value);
+    renderFavourites();            // markers need a map, which buildUI lacked
+    if (fitFavouritesOnLoad) {
+      fitToSpots(fitFavouritesOnLoad);
+      fitFavouritesOnLoad = null;
+    }
     scheduleRender();
   });
   map.on('moveend', () => { ensureContours(); scheduleRender(); });
@@ -904,11 +1088,13 @@ function buildMap() {
     else el.hidden = true;
   });
   map.on('click', e => {
-    if (e.originalEvent.target.closest('.spot')) return;
+    // Markers are DOM children of the map container, so a click on one reaches
+    // this handler too and would bury the marker's own popup under a generic
+    // one for whatever is underneath.
+    if (e.originalEvent.target.closest('.spot, .fav')) return;
     const { lat, lng } = e.lngLat;
-    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(
-      `<b>${elevationAt(lat, lng)}</b><br>${lat.toFixed(5)}, ${lng.toFixed(5)}<br>` +
-      `<a target="_blank" rel="noopener noreferrer" href="https://www.google.com/maps/search/?api=1&query=${lat.toFixed(5)},${lng.toFixed(5)}">open in Google Maps</a>`
-    ).addTo(map);
+    new maplibregl.Popup().setLngLat(e.lngLat)
+      .setHTML(`<b>${elevationAt(lat, lng)}</b><br>` + spotPopupBody(lat, lng))
+      .addTo(map);
   });
 }

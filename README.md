@@ -179,6 +179,31 @@ shadow by less than one 400 m cell. At the overview level the canopy is the
 under-block there; zoom in for the honest answer. Date and time are read as the
 device's own clock, which is the Swedish one for anyone standing in the region.
 
+## Favourites
+
+Click anywhere on the map, or a ranked marker, and Save. Saved spots keep their
+own markers whatever the filters hide, take an optional name, and offer Google
+Maps per spot or as one drive through the lot (the Maps URL API takes nine
+waypoints and a destination, so a longer list is cut rather than quietly
+truncated).
+
+There is no account, and the reason is not laziness. A login only buys you
+somewhere to write, so it would mean standing a database behind a site that is
+otherwise a gigabyte of static files on a CDN - and that database would be the
+one part of the app that stops working in a valley with no signal, which is
+where the list is wanted. Share does the job an account would have done: the
+whole list rides in the URL fragment as gzipped tuples, so moving spots from
+the laptop to the phone is one paste. Fifty unnamed spots come to 342
+characters, well inside what a URL will carry. Opening such a link appends -
+never displaces - and moves the map to what arrived.
+
+The cost of that choice is honest: the list lives in `localStorage`, so it is
+per-browser, and iOS Safari evicts script-written storage after seven days
+without a visit. Adding the site to the home screen helps; a share link mailed
+to yourself is the reliable backup. If that ever bites often enough to matter,
+the store is one module (`web/favourites.js`) with no map or DOM in it, and a
+sync layer would go behind it without touching anything else.
+
 ## Region
 
 Skåne, Halland, southern Bohuslän and Västra Götaland: lat 55.30-59.20,
