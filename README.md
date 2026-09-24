@@ -18,6 +18,16 @@ Code lives on the internal SSD. Bulk data lives on `/Volumes/T7/scenic` — the 
 which has no symlinks, is case-insensitive, and has weak file locking, so git and SQLite
 misbehave on it.
 
+That path is hardcoded in `scenic/safe.py`, `scenic/vegetation.py` and the `scripts/build_*`
+files, so running any of the data pipeline elsewhere means editing those first. None of the
+generated products are in the repo: the region alone is 2.3 GB, and all of it is
+reproducible from the sources listed under [Data](#data). The site in `web/` is the only
+part that runs without them, and it needs a packed region to read.
+
+The code here is MIT ([LICENSE](LICENSE)). The data it consumes is not: TessaDEM is ODbL,
+and the Meta/WRI canopy and ESA WorldCover are CC BY 4.0. The site carries those credits in
+its attribution control, and anything you build from this needs to keep doing so.
+
 ## Running
 
     ./.venv/bin/python scripts/verify_dem.py
