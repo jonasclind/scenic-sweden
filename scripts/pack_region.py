@@ -21,12 +21,41 @@ SRC = Path("/Volumes/T7/scenic/region")
 DST = Path("/Volumes/T7/scenic/region_web")
 
 
-def block_mean(a, f, axis_pair=(0, 1)):
+def block_mean(a, f):
     """Mean over f x f blocks, trimming any partial edge block."""
     r, c = a.shape[0] // f * f, a.shape[1] // f * f
     a = a[:r, :c]
     tail = a.shape[2:]
     return a.reshape(r // f, f, c // f, f, *tail).mean(axis=(1, 3))
+
+
+def block_land(a, valid, f):
+    """Each f x f block reshaped, with a matching land mask.
+
+    Everything that describes what a viewer would find has to be reduced over
+    the land in a block and nothing else. Water is not a place with a bad view,
+    it is not a place at all - and averaging it in gave every block touching a
+    shore the reach of the open water beside it. A strip of coast that can only
+    see inland was credited with fifteen kilometres of lake, which drew a
+    bright rim round every lake at the overview and put ranked spots out on the
+    water; zooming in made them vanish, because at native resolution those
+    cells are water and scored nothing.
+    """
+    r, c = a.shape[0] // f * f, a.shape[1] // f * f
+    tail = a.shape[2:]
+    blocks = np.asarray(a[:r, :c]).reshape(r // f, f, c // f, f, *tail)
+    land = (np.asarray(valid[:r, :c]) > 0).reshape(r // f, f, c // f, f)
+    return blocks, land
+
+
+def block_land_mean(a, valid, f):
+    """Mean over the land cells of each block; zero where a block has none."""
+    blocks, land = block_land(a, valid, f)
+    weight = land[..., None] if a.ndim > 2 else land
+    weight = weight.astype(np.float32)
+    total = (blocks.astype(np.float32) * weight).sum(axis=(1, 3))
+    count = weight.sum(axis=(1, 3))
+    return np.divide(total, count, out=np.zeros_like(total), where=count > 0)
 
 
 def main():
@@ -58,20 +87,26 @@ def main():
     d0 = DST / "L0" / "0_0"
     d0.mkdir(parents=True, exist_ok=True)
     print(f"L0 overview {r0} x {c0} at {meta['obs_m']*f:.0f} m")
-    # valid if any cell in the block is land; elevation averaged over those
-    v0 = (valid[:r0*f, :c0*f].reshape(r0, f, c0, f).max(axis=(1, 3)) > 0).astype(np.uint8)
-    e0 = np.rint(block_mean(elev.astype(np.float32), f)).astype(np.int16)
+    # A block counts as land if any of its cells is. Elevation, though, stays
+    # an average over all of them: the sun sweep reads it as a surface, and a
+    # lake is as much a surface as a field.
+    _, land = block_land(elev, valid, f)
+    v0 = land.any(axis=(1, 3)).astype(np.uint8)
+    e0 = np.rint(block_mean(np.asarray(elev, np.float32), f)).astype(np.int16)
     (d0 / "valid.bin").write_bytes(v0.tobytes())
     (d0 / "elev.bin").write_bytes(e0.tobytes())
-    # the site filter wants the quietest cover in the block, not the average:
-    # a clearing inside a 400 m cell is somewhere you can actually stand
-    s0 = site[:r0*f, :c0*f].reshape(r0, f, c0, f).min(axis=(1, 3)).astype(np.uint8)
+    # The site filter wants the quietest cover on the land in the block - a
+    # clearing inside a 400 m cell is somewhere you can actually stand - but
+    # open water is not a clearing, so it does not get to supply the minimum.
+    cover, _ = block_land(site, valid, f)
+    s0 = np.where(land, cover, 255).min(axis=(1, 3))
+    s0 = np.where(land.any(axis=(1, 3)), s0, 0).astype(np.uint8)
     (d0 / "canopy.bin").write_bytes(s0.tobytes())
     dr0 = np.empty((r0, c0, A), np.uint8)
     for y in range(0, r0 * f, 256 * f):
         ye = min(y + 256 * f, r0 * f)
         dr0[y // f: ye // f] = np.rint(
-            block_mean(drop[y:ye].astype(np.float32), f)).astype(np.uint8)
+            block_land_mean(drop[y:ye], valid[y:ye], f)).astype(np.uint8)
     (d0 / "drop.bin").write_bytes(dr0.tobytes())
     for v, cm in combos:
         dist = open_src(f"dist_{v}_{cm}.u8", (R, C, A), np.uint8)
@@ -81,9 +116,12 @@ def main():
         for y in range(0, r0 * f, step * f):
             ye = min(y + step * f, r0 * f)
             out[y // f: ye // f] = np.rint(
-                block_mean(dist[y:ye].astype(np.float32), f)).astype(np.uint8)
-        # a block sees water if any cell in it does
-        w0 = water[:r0*f, :c0*f].reshape(r0, f, c0, f).max(axis=(1, 3)).astype(np.uint32)
+                block_land_mean(dist[y:ye], valid[y:ye], f)).astype(np.uint8)
+        # A block sees water if any of its *land* sees water. Taking the max
+        # over every cell let the lake itself answer the question, so the
+        # filter passed anything that merely touched a shore.
+        seen, _ = block_land(water, valid, f)
+        w0 = np.where(land, seen, 0).max(axis=(1, 3)).astype(np.uint32)
         (d0 / f"dist_{v}_{cm}.bin").write_bytes(out.tobytes())
         (d0 / f"water_{v}_{cm}.bin").write_bytes(w0.tobytes())
         print(f"  {v}_{cm}: {out.nbytes/1e6:.1f} MB")

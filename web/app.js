@@ -375,13 +375,26 @@ function score(view, data, sunMask) {
     plotReach = new Float32Array(cells);
     const span = 2 * radiusCells + 1;
     const neighbourhood = new Float32Array(span * span);
-    const rank = Math.floor(span * span * 0.25);
     for (let y = radiusCells; y < height - radiusCells; y++) {
       for (let x = radiusCells; x < width - radiusCells; x++) {
+        // Water is not a plot, so it neither gets a score nor contributes one.
+        // Sampling only the land around a cell without this first line handed
+        // every stretch of open water the view from the shore beside it.
+        if (!data.valid[y * width + x]) continue;
+        // Only land goes into the sample. Counting water as a neighbour
+        // scoring zero answered a question nobody asked - it is not a plot
+        // that fails the test, it is not a plot - and it wiped out the best
+        // lakeside viewpoints there are: a shore has three water neighbours
+        // out of nine, which is enough to drag the quartile to zero. A real
+        // 12.9 km view over Vanern read 0.00 km until this changed.
         let n = 0;
         for (let dy = -radiusCells; dy <= radiusCells; dy++)
-          for (let dx = -radiusCells; dx <= radiusCells; dx++)
-            neighbourhood[n++] = reach[(y + dy) * width + x + dx];
+          for (let dx = -radiusCells; dx <= radiusCells; dx++) {
+            const neighbour = (y + dy) * width + x + dx;
+            if (data.valid[neighbour]) neighbourhood[n++] = reach[neighbour];
+          }
+        if (!n) continue;
+        const rank = Math.floor(n * 0.25);
         // Partial selection sort: only the smallest `rank + 1` need ordering.
         for (let i = 0; i <= rank; i++) {
           let smallest = i;

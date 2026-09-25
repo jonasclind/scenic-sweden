@@ -179,6 +179,35 @@ shadow by less than one 400 m cell. At the overview level the canopy is the
 under-block there; zoom in for the honest answer. Date and time are read as the
 device's own clock, which is the Swedish one for anyone standing in the region.
 
+## Water is not a place
+
+Both levels aggregate, and both used to let open water into aggregates that
+describe land. It went wrong in opposite directions, which is why the map
+disagreed with itself depending on how far you were zoomed out.
+
+At the overview a 400 m cell counted as land if any one of its sixteen 100 m
+cells was, and then reported the *mean of all sixteen*. A strip of shore that
+can only see inland was credited with the fifteen kilometres of lake beside it,
+which drew a bright rim round every lake and put ranked spots out on open
+water. Every overview reduction now runs over the land in a block and nothing
+else - reach, descent, and the sees-water flag, which the lake had otherwise
+been answering on the shore's behalf. Elevation is the exception and stays an
+average over everything, because the sun sweep reads it as a surface and a lake
+is a surface.
+
+Zoomed in, the plot-robustness quartile counted a water neighbour as a
+neighbour scoring zero. A shore has three of those out of nine, which is enough
+to drag the quartile to zero, so the best lakeside viewpoints in the region
+read 0.00 km - a real 12.9 km view over Vänern among them. The sample is now
+drawn from land only, and cells that are not land get no score at all rather
+than borrowing one from the shore beside them.
+
+    L0 overview, Vänern shore     looking west   looking east
+    west-facing shore                  6.16 km        1.22 km
+    east-facing shore                  1.08 km        5.77 km
+    inland                             1.58 km        1.47 km
+    open water                         0.00 km        0.00 km
+
 ## Favourites
 
 Click anywhere on the map, or a ranked marker, and Save. Saved spots keep their
